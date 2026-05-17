@@ -1,36 +1,36 @@
-use starlark::environment::Globals;
-use starlark::environment::Module;
-use starlark::eval::Evaluator;
-use starlark::syntax::AstModule;
-use starlark::syntax::Dialect;
-use starlark::values::Value;
+use std::env;
+use std::fs;
+
+use ariadne::{Color, Label, Report, ReportKind, Source};
+
+mod parser;
 
 fn main() {
-    let content = r#"
-def hello():
-   return "hello"
-hello() + " world!"
-"#;
+    let filename = env::args().nth(1).expect("Expected file argument");
+    let src = fs::read_to_string(&filename).expect("Failed to read file");
 
-    // We first parse the content, giving a filename and the Starlark
-    // `Dialect` we'd like to use (we pick standard).
-    let ast: AstModule = AstModule::parse(
-        "hello_world.star",
-        content.to_owned(),
-        &Dialect::Standard,
-    )?;
-
-    // We create a `Globals`, defining the standard library functions available.
-    // The `standard` function uses those defined in the Starlark specification.
-    let globals: Globals = Globals::standard();
-
-    // We create a `Module`, which stores the global variables for our calculation.
-    let module: Module = Module::new();
-
-    // We create an evaluator, which controls how evaluation occurs.
-    let mut eval: Evaluator = Evaluator::new(&module);
-
-    // And finally we evaluate the code using the evaluator.
-    let res: Value = eval.eval_module(ast, &globals)?;
-    assert_eq!(res.unpack_str(), Some("hello world!"));
+    match parser::parser::parse_str(&src) {
+        Ok(expr) => {
+            println!("{:?}", expr)
+        }
+        Err(errs) => {
+            for err in errs {
+                Report::build(ReportKind::Error, ((), err.span().into_range()))
+                    .with_config(
+                        ariadne::Config::new()
+                            .with_index_type(ariadne::IndexType::Byte),
+                    )
+                    .with_code(3)
+                    .with_message(err.to_string())
+                    .with_label(
+                        Label::new(((), err.span().into_range()))
+                            .with_message(err.reason().to_string())
+                            .with_color(Color::Red),
+                    )
+                    .finish()
+                    .eprint(Source::from(&src))
+                    .unwrap();
+            }
+        }
+    }
 }
