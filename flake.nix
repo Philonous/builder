@@ -16,6 +16,7 @@
 
         deps = [ pkgs.rustc
                  pkgs.cargo
+                 pkgs.cargo-insta
 
                  pkgs.go-task
                  pkgs.rust-analyzer

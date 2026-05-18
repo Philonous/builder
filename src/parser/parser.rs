@@ -46,28 +46,6 @@ pub struct Ast<'a> {
     decls: Vec<Decl<'a>>,
 }
 
-// // This function signature looks complicated, but don't fear! We're just saying that this function is generic over
-// // inputs that:
-// //     - Can have tokens pulled out of them by-value, by cloning (`ValueInput`)
-// //     - Produces tokens of type `Token`, the type we defined above (`Token = Token<'a>`)
-// //     - Produces spans of type `SimpleSpan`, a built-in span type provided by chumsky (`Span = SimpleSpan`)
-// // The function then returns a parser that:
-// //     - Has an input type of type `I`, the one we declared as a type parameter
-// //     - Produces an `SExpr` as its output
-// //     - Uses `Rich`, a built-in error type provided by chumsky, for error generation
-// fn parse_expression<'tok, 'src: 'tok, I>(
-// ) -> impl Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>>
-// where
-//     I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
-// {
-//     recursive(|expr| {
-//         select! {
-//             Token::StringLit(str) => Lit::String(str),
-//             _ => todo!()
-//         }
-//     })
-// }
-
 impl<'tok> Ident<'tok> {
     fn parse<'src: 'tok, I>(
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
@@ -204,21 +182,21 @@ pub fn parse_str<'a>(
     Ast::parse().parse(token_stream).into_result()
 }
 
-// #[cfg(test)]
-// mod test {
-//     use super::*;
+#[cfg(test)]
+mod test {
+    use super::*;
 
-//     #[test]
-//     fn test_parse_expr() {
-//         assert_eq!(
-//             parse_str_expr("foo(\"test\",`quux`)").unwrap(),
-//             Expr::FunApp(
-//                 Ident("foo"),
-//                 vec![
-//                     Expr::Lit(Lit::String(Cow::Borrowed("test"))),
-//                     Expr::Lit(Lit::Backticks(Cow::Borrowed("quux")))
-//                 ]
-//             )
-//         )
-//     }
-// }
+    use insta;
+    use std::fs;
+
+    #[test]
+    fn golden() {
+        insta::glob!("test/parser", "*.in", |path| {
+            let input = fs::read_to_string(path).unwrap();
+            insta::assert_debug_snapshot!(
+                path.file_stem().unwrap().to_str().unwrap(),
+                super::parse_str(&input)
+            );
+        });
+    }
+}

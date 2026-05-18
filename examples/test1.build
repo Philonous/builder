@@ -1,7 +1,6 @@
 @dist/exe {
 
   # Declare variable for reuse
-  # Inferred to be string
   let exe = "target/\"build\"/exe";
 
   # Need accepts one ore more targets
@@ -9,11 +8,16 @@
   # glob returns a list of matching files
   need(glob("src/**/*"));
 
-  # Note: Needs with multiple arguments and successive needs without
-  # interspersed effects are parallel.
-
   # Actually build the code
-  # bare shell forms are single line, no semicolon at the end
+  # command for runs the command
   `cargo build`
+
+}
+
+target(docker-image) "app" {
+  need("dist/exe");
+
+  # Tag is inherited from resource, ${} is variable use/interpolation
+  `docker build -t ${target}`
 
 }

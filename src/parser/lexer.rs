@@ -1,4 +1,3 @@
-use litrs;
 use std::{borrow::Cow, fmt};
 
 use logos::{Lexer, Logos};
@@ -61,8 +60,8 @@ pub fn unquote_string(
             match chars.next() {
                 Some('\\') => out.push('\\'),
                 Some(c) if c == close => out.push(close),
-                Some('\n') => out.push('\n'),
-                Some('\t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
                 Some(other) => return Err(LexError::UnknownEscape(other)),
                 None => unreachable!(
                     "lexer bug: trailing backslash inside quoted literal — \
@@ -83,7 +82,7 @@ pub enum Token<'a> {
     #[regex(r"[a-zA-Z][a-zA-Z/-]*", |lex| lex.slice())]
     Ident(&'a str),
 
-    #[regex(r"@[.a-zA-Z][.a-zA-Z/-]*", |lex| lex.slice())]
+    #[regex(r"@[.a-zA-Z][.a-zA-Z/-]*", |lex| &lex.slice()[1..])]
     AtIdent(&'a str),
 
     #[token("(")]
@@ -130,17 +129,17 @@ impl fmt::Display for Token<'_> {
         match self {
             Self::Ident(s) => write!(f, "{s}"),
             Self::AtIdent(s) => write!(f, "@{s}"),
-            Self::ParenOpen => write!(f, ""),
-            Self::ParenClose => write!(f, ""),
-            Self::BraceOpen => write!(f, ""),
-            Self::BraceClose => write!(f, ""),
-            Self::Semicolon => write!(f, ""),
-            Self::Comma => write!(f, ""),
-            Self::Equals => write!(f, ""),
+            Self::ParenOpen => write!(f, "("),
+            Self::ParenClose => write!(f, ")"),
+            Self::BraceOpen => write!(f, "{{"),
+            Self::BraceClose => write!(f, "}}"),
+            Self::Semicolon => write!(f, ";"),
+            Self::Comma => write!(f, ","),
+            Self::Equals => write!(f, "="),
             Self::StringLit(s) => write!(f, "{s}"),
             Self::BackticksLit(s) => write!(f, "{s}"),
-            Self::Let => write!(f, ""),
-            Self::Comment => write!(f, ""),
+            Self::Let => write!(f, "let"),
+            Self::Comment => write!(f, "#"),
             Self::Error => write!(f, ""),
         }
     }
@@ -149,47 +148,21 @@ impl fmt::Display for Token<'_> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use insta;
     use std::fs;
 
     #[test]
-    fn test() {
-        let filename = "examples/test1.build";
-        let src = fs::read_to_string(filename).expect("Failed to read file");
-        let tokens: Vec<Result<Token, _>> =
-            Token::lexer(src.as_str()).collect();
+    fn golden() {
+        eprintln!("{:?}", std::env::current_dir());
+        insta::glob!("test/lexer", "*.in", |path| {
+            let src = fs::read_to_string(path).expect("Failed to read file");
+            let tokens: Vec<Result<Token, _>> =
+                Token::lexer(src.as_str()).collect();
 
-        // for t in tokens {
-        //     println!("{:?}", t);
-        // }
-
-        assert_eq!(
-            tokens,
-            [
-                Ok(Token::AtIdent("@dist/exe")),
-                Ok(Token::BraceOpen),
-                Ok(Token::Let),
-                Ok(Token::Ident("exe")),
-                Ok(Token::Equals),
-                Ok(Token::StringLit(Cow::Borrowed("target/\"build\"/exe"))),
-                Ok(Token::Semicolon),
-                Ok(Token::Ident("need")),
-                Ok(Token::ParenOpen),
-                Ok(Token::StringLit(Cow::Borrowed("Cargo.toml"))),
-                Ok(Token::Comma),
-                Ok(Token::StringLit(Cow::Borrowed("Cargo.lock"))),
-                Ok(Token::ParenClose),
-                Ok(Token::Semicolon),
-                Ok(Token::Ident("need")),
-                Ok(Token::ParenOpen),
-                Ok(Token::Ident("glob")),
-                Ok(Token::ParenOpen),
-                Ok(Token::StringLit(Cow::Borrowed("src/**/*"))),
-                Ok(Token::ParenClose),
-                Ok(Token::ParenClose),
-                Ok(Token::Semicolon),
-                Ok(Token::BackticksLit(Cow::Borrowed("cargo build"))),
-                Ok(Token::BraceClose)
-            ]
-        );
+            insta::assert_debug_snapshot!(
+                path.file_stem().unwrap().to_str().unwrap(),
+                tokens
+            );
+        });
     }
 }

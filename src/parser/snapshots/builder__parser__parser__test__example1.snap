@@ -1,0 +1,121 @@
+---
+source: src/parser/parser.rs
+expression: "super::parse_str(&input)"
+input_file: src/parser/test/parser/example1.in
+---
+Ok(
+    Ast {
+        decls: [
+            Decl {
+                header: AtDecl(
+                    Ident(
+                        "dist/exe",
+                    ),
+                ),
+                definition: [
+                    Let(
+                        Ident(
+                            "exe",
+                        ),
+                        Lit(
+                            String(
+                                "target/\"build\"/exe",
+                            ),
+                        ),
+                    ),
+                    Expr(
+                        FunApp(
+                            Ident(
+                                "need",
+                            ),
+                            [
+                                Lit(
+                                    String(
+                                        "Cargo.toml",
+                                    ),
+                                ),
+                                Lit(
+                                    String(
+                                        "Cargo.lock",
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ),
+                    Expr(
+                        FunApp(
+                            Ident(
+                                "need",
+                            ),
+                            [
+                                FunApp(
+                                    Ident(
+                                        "glob",
+                                    ),
+                                    [
+                                        Lit(
+                                            String(
+                                                "src/**/*",
+                                            ),
+                                        ),
+                                    ],
+                                ),
+                            ],
+                        ),
+                    ),
+                    Expr(
+                        Lit(
+                            Backticks(
+                                "cargo build",
+                            ),
+                        ),
+                    ),
+                ],
+            },
+            Decl {
+                header: Explicit(
+                    FunApp(
+                        Ident(
+                            "target",
+                        ),
+                        [
+                            Ident(
+                                Ident(
+                                    "docker-image",
+                                ),
+                            ),
+                        ],
+                    ),
+                    Lit(
+                        String(
+                            "app",
+                        ),
+                    ),
+                ),
+                definition: [
+                    Expr(
+                        FunApp(
+                            Ident(
+                                "need",
+                            ),
+                            [
+                                Lit(
+                                    String(
+                                        "dist/exe",
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ),
+                    Expr(
+                        Lit(
+                            Backticks(
+                                "docker build -t ${target}",
+                            ),
+                        ),
+                    ),
+                ],
+            },
+        ],
+    },
+)
