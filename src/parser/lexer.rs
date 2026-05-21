@@ -1,78 +1,15 @@
-use std::{borrow::Cow, fmt};
+use std::fmt;
 
 use logos::{Lexer, Logos};
 
 use thiserror::Error;
+use super::string::Quoted;
 
 #[derive(Debug, Error, PartialEq, Clone, Default)]
 pub enum LexError {
-    #[error("unknown escape sequence: \\{0}")]
-    UnknownEscape(char),
     #[default]
     #[error("Other lexing error")]
     Other,
-}
-
-/// Strips the surrounding `open`/`close` quotes from a lexer-produced
-/// literal and resolves `\\` and `\<close>`.
-///
-/// `open` and `close` may differ (e.g. `«` / `»`) or be the same (`"` / `"`).
-/// The escape character is hard-coded as `\`; neither delimiter may be `\`.
-///
-/// # Lexer invariants
-///
-/// * `s` starts with `open` and ends with `close`, with length at least
-///   `open.len_utf8() + close.len_utf8()`. `debug_assert!`.
-/// * No unescaped `close` appears between the delimiters — it would have
-///   terminated the literal. **Not verified**; a violation silently copies
-///   the stray delimiter through.
-/// * The byte before the closing `close` is not a lone `\`, since that
-///   backslash would have escaped the closing quote. Caught by `unreachable!`.
-///
-/// Stray `open` characters in the interior (when `open != close`) are not
-/// the lexer's problem and are copied as ordinary text.
-///
-/// # Errors
-///
-/// [`UnquoteError::UnknownEscape`] if `\` is followed by anything other
-/// than `\` or `close`.
-pub fn unquote_string(
-    open: char,
-    close: char,
-    s: &str,
-) -> Result<Cow<'_, str>, LexError> {
-    debug_assert!(s.starts_with(open) && s.ends_with(close));
-    debug_assert!(s.len() >= open.len_utf8() + close.len_utf8());
-
-    let inner = &s[open.len_utf8()..s.len() - close.len_utf8()];
-
-    let Some(first) = inner.find('\\') else {
-        return Ok(Cow::Borrowed(inner));
-    };
-
-    let (head, tail) = inner.split_at(first);
-    let mut out = String::with_capacity(inner.len());
-    out.push_str(head);
-
-    let mut chars = tail.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('\\') => out.push('\\'),
-                Some(c) if c == close => out.push(close),
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some(other) => return Err(LexError::UnknownEscape(other)),
-                None => unreachable!(
-                    "lexer bug: trailing backslash inside quoted literal — \
-                     it should have escaped the closing `{close}`"
-                ),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    Ok(Cow::Owned(out))
 }
 
 #[derive(Debug, Logos, PartialEq, Clone)]
@@ -103,13 +40,16 @@ pub enum Token<'a> {
     // Literals
 
     // Taken from https://logos.maciej.codes/examples/json.html
-    #[regex(r#""([^"\\\x00-\x1F]|\\(["\\bnfrt/]|u[a-fA-F0-9]{4}))*""#
-        , |lex| unquote_string('"', '"', lex.slice()))]
-    StringLit(Cow<'a, str>),
-    // Taken from https://logos.maciej.codes/examples/json.html
-    #[regex(r#"`([^`\\\x00-\x1F]|\\([`\\bnfrt/]|u[a-fA-F0-9]{4}))*`"#
-        , |lex| unquote_string('`', '`', lex.slice()))]
-    BackticksLit(Cow<'a, str>),
+    #[regex(r#""([^"\\\x00-\x1F]|\\(["\\bnfrt/]|u[a-fA-F0-9]{4}))*""#,
+        |s| Quoted{raw: s.slice(), delim: '"'})]
+    StringLit(Quoted<'a>),
+
+    // Command blocks
+    #[token("`" , command_block)]
+    CommandStart,
+    CommandUnquoted(&'a str),
+    CommandQuoted(&'a str),
+    CommendEnd,
 
     // Keywords
     #[token("let")]
@@ -136,14 +76,75 @@ impl fmt::Display for Token<'_> {
             Self::Semicolon => write!(f, ";"),
             Self::Comma => write!(f, ","),
             Self::Equals => write!(f, "="),
-            Self::StringLit(s) => write!(f, "{s}"),
-            Self::BackticksLit(s) => write!(f, "{s}"),
+            Self::StringLit(s) => {
+                let sraw = s.raw;
+                write!(f, "{sraw}")
+            },
+            // Self::Command(s) => {
+            //     write!(f, "`")?;
+            //     let mut iter = s.iter();
+            //     if let Some(first) = iter.next() {
+            //         write!(f, "{first}")?;
+            //         for x in iter {
+            //             write!(f, " {x}")?;
+            //         }
+            //     }
+            //     write!(f, "`")?;
+            //     Ok(())
+
+            // }
             Self::Let => write!(f, "let"),
             Self::Comment => write!(f, "#"),
             Self::Error => write!(f, ""),
         }
     }
 }
+
+// Command tokens
+
+
+#[derive(Debug, Logos, PartialEq, Clone)]
+#[logos(error(LexError))]
+#[logos(skip r"[ \t\r\n\f]+")]
+pub enum CommandToken<'a> {
+    #[regex(r#"[^ `\"$\t\r\n\f]+"#, |lex| lex.slice())]
+    UnquotedString(&'a str),
+    #[regex(r#""([^"\\\x00-\x1F]|\\(["\\bnfrt/]|u[a-fA-F0-9]{4}))*""#,
+        |s| Quoted{raw: s.slice(), delim: '"'})]
+    QuotedString(Quoted<'a>),
+    #[token("`")]
+    CommandEnd,
+}
+
+impl fmt::Display for CommandToken<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::UnquotedString(s) => write!(f, "{s}"),
+            Self::QuotedString(s) => {
+                let sraw=s.raw;
+                write!(f, "{sraw}")}
+            Self::CommandEnd => Ok(()),
+        }
+    }
+}
+
+
+
+fn command_block<'a>(lex: &mut Lexer<'a, Token<'a>>) -> Option<Vec<CommandToken<'a>>> {
+    let mut command_lexer = lex.clone().morph::<CommandToken<'a>>();
+    let mut tokens = Vec::new();
+    while let Some(token) = command_lexer.next() {
+        match token {
+            Ok(CommandToken::CommandEnd) => break,
+            Err(_) => return None,
+            Ok(tok) => tokens.push(tok),
+        }
+    }
+    *lex = command_lexer.morph();
+    Some(tokens)
+}
+
+
 
 #[cfg(test)]
 mod test {

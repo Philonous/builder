@@ -3,16 +3,13 @@ use std::fs;
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
 
+// mod error;
 mod parser;
+mod target;
 
-fn main() {
-    let filename = env::args().nth(1).expect("Expected file argument");
-    let src = fs::read_to_string(&filename).expect("Failed to read file");
-
-    match parser::parser::parse_str(&src) {
-        Ok(expr) => {
-            println!("{:?}", expr)
-        }
+fn parse_targets<'a>(src: &'a str) -> Vec<target::Target<'a>> {
+    match parser::parser::parse_str(src) {
+        Ok(ast) => ast.to_targets(),
         Err(errs) => {
             for err in errs {
                 Report::build(ReportKind::Error, ((), err.span().into_range()))
@@ -31,6 +28,28 @@ fn main() {
                     .eprint(Source::from(&src))
                     .unwrap();
             }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn main() {
+    let args = env::args().collect::<Vec<_>>();
+    let filename = &args[1];
+    let src = fs::read_to_string(filename).expect("Failed to read file");
+    let targets = parse_targets(&src);
+    if args.len() >= 3 {
+        let target = &args[2];
+        for t in targets {
+            if &t.name == target {
+                println!("found");
+                std::process::exit(0);
+            }
+        }
+    } else {
+        println!("targets:");
+        for target in targets {
+            println!(" - {} {}", target.typ.0, target.name);
         }
     }
 }

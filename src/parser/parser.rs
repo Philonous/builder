@@ -2,23 +2,50 @@ use chumsky::input::Stream;
 use chumsky::{input::ValueInput, prelude::*};
 use std::borrow::Cow;
 
+use super::error::ParseError;
 use super::lexer;
+use super::lexer::CommandToken;
 use super::lexer::Token;
+use super::string::Quoted;
 use logos::Logos;
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct Ident<'a>(&'a str);
+pub struct Ident<'a>(pub &'a str);
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Lit<'a> {
-    String(Cow<'a, str>),
-    Backticks(Cow<'a, str>),
+    String(&'a str),
+}
+
+#[derive(Clone, PartialEq, Debug)]
+enum CommandPart<'a> {
+    Unquoted(&'a str),
+    Quoted(Quoted<'a>),
+}
+
+#[derive(Clone, PartialEq, Debug)]
+struct Command<'a>(Vec<CommandPart<'a>>);
+
+impl<'a> Command<'a> {
+    pub fn resolve_to_strings(
+        &'a self,
+    ) -> Result<Vec<Cow<'a, str>>, ParseError> {
+        let mut res = Vec::with_capacity(self.0.len());
+        for part in &self.0 {
+            res.push(match part {
+                CommandPart::Unquoted(s) => Cow::Borrowed(*s),
+                CommandPart::Quoted(s) => s.unquote()?,
+            });
+        }
+        Ok(res)
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Expr<'a> {
     Lit(Lit<'a>),
     Ident(Ident<'a>),
+    Command(Command<'a>),
     FunApp(Ident<'a>, Vec<Expr<'a>>),
 }
 
@@ -37,13 +64,13 @@ pub enum DeclHeader<'a> {
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Decl<'a> {
-    header: DeclHeader<'a>,
-    definition: Vec<Statement<'a>>,
+    pub header: DeclHeader<'a>,
+    pub definition: Vec<Statement<'a>>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Ast<'a> {
-    decls: Vec<Decl<'a>>,
+    pub decls: Vec<Decl<'a>>,
 }
 
 impl<'tok> Ident<'tok> {
@@ -76,7 +103,26 @@ impl<'tok> Lit<'tok> {
     {
         select! {
             Token::StringLit(str) => Lit::String(str),
-            Token::BackticksLit(str) => Lit::Backticks(str),
+        }
+    }
+}
+
+impl<'tok> Command<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        select! {
+            Token::Command(parts) => {
+                let parts = parts.iter().filter_map(|p| match p {
+                    CommandToken::UnquotedString(s) =>
+                    Some(CommandPart::Unquoted(s)),
+                    CommandToken::QuotedString(s) => Some(CommandPart::Quoted(s)),
+                    CommandToken::CommandEnd => None,
+                }).collect();
+                Command(parts)
+            }
         }
     }
 }
@@ -95,7 +141,9 @@ impl<'tok> Expr<'tok> {
             let fun_app = Ident::parse()
                 .then(param_list)
                 .map(|(ident, params)| Expr::FunApp(ident, params));
-            fun_app
+            Command::parse()
+                .map(Expr::Command)
+                .or(fun_app)
                 .or(Lit::parse().map(Expr::Lit))
                 .or(Ident::parse().map(Expr::Ident))
         })

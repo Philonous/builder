@@ -1,0 +1,10 @@
+version: "3"
+
+tasks:
+  build:
+    cmds:
+      - cargo build
+
+  test:
+    cmds:
+      - cargo test
