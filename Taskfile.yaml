@@ -5,6 +5,11 @@ tasks:
     cmds:
       - cargo build
 
+  check:
+    desc: Quickly check if project would compile
+    cmds:
+      - RUSTFLAGS="-Awarnings" cargo check
+
   test:
     cmds:
       - cargo test

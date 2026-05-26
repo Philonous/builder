@@ -1,57 +1,66 @@
+use super::string::QuoteError;
+use ariadne::{Color, Label, Report, ReportKind};
 use chumsky::input::Stream;
 use chumsky::{input::ValueInput, prelude::*};
 use std::borrow::Cow;
 
-use super::error::ParseError;
-use super::lexer;
-use super::lexer::CommandToken;
-use super::lexer::Token;
+use super::lexer::{
+    command, normal, CommandToken, NormalToken, Token, Tokenizer,
+};
 use super::string::Quoted;
-use logos::Logos;
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct Ident<'a>(pub &'a str);
+pub use crate::common::Ident;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Lit<'a> {
-    String(&'a str),
+    String(Quoted<'a>),
 }
 
 #[derive(Clone, PartialEq, Debug)]
-enum CommandPart<'a> {
+pub enum MaybeQuoted<'a> {
     Unquoted(&'a str),
     Quoted(Quoted<'a>),
 }
 
-#[derive(Clone, PartialEq, Debug)]
-struct Command<'a>(Vec<CommandPart<'a>>);
-
-impl<'a> Command<'a> {
-    pub fn resolve_to_strings(
-        &'a self,
-    ) -> Result<Vec<Cow<'a, str>>, ParseError> {
-        let mut res = Vec::with_capacity(self.0.len());
-        for part in &self.0 {
-            res.push(match part {
-                CommandPart::Unquoted(s) => Cow::Borrowed(*s),
-                CommandPart::Quoted(s) => s.unquote()?,
-            });
-        }
-        Ok(res)
+impl<'a> MaybeQuoted<'a> {
+    fn resolve(&self) -> Result<Cow<'a, str>, QuoteError> {
+        Ok(match self {
+            Self::Unquoted(s) => Cow::Borrowed(*s),
+            Self::Quoted(q) => q.unquote()?,
+        })
     }
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum Expr<'a> {
+pub struct Command<S: Clone + PartialEq + std::fmt::Debug> {
+    pub executable: S,
+    pub args: Vec<S>,
+}
+
+impl<'a> Command<MaybeQuoted<'a>> {
+    pub fn resolve_strings(self) -> Result<Command<Cow<'a, str>>, QuoteError> {
+        let executable = self.executable.resolve()?;
+        let mut args = Vec::with_capacity(self.args.len());
+        for part in &self.args {
+            args.push(part.resolve()?);
+        }
+        Ok(Command { executable, args })
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum ExprKind<'a> {
     Lit(Lit<'a>),
     Ident(Ident<'a>),
-    Command(Command<'a>),
+    Command(Command<MaybeQuoted<'a>>),
     FunApp(Ident<'a>, Vec<Expr<'a>>),
 }
 
 #[derive(Clone, PartialEq, Debug)]
+pub struct Expr<'a>(pub Spanned<ExprKind<'a>>);
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum Statement<'a> {
-    Let(Ident<'a>, Expr<'a>),
+    Let(Spanned<Ident<'a>>, Expr<'a>),
     Expr(Expr<'a>),
 }
 
@@ -63,9 +72,26 @@ pub enum DeclHeader<'a> {
 }
 
 #[derive(Clone, PartialEq, Debug)]
+pub struct Block<'a>(pub Vec<Statement<'a>>);
+
+impl<'tok> Block<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        Statement::parse()
+            .separated_by(just(normal!(Semicolon)))
+            .collect::<Vec<_>>()
+            .delimited_by(just(normal!(BraceOpen)), just(normal!(BraceClose)))
+            .map(Block)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub struct Decl<'a> {
     pub header: DeclHeader<'a>,
-    pub definition: Vec<Statement<'a>>,
+    pub definition: Block<'a>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -80,7 +106,7 @@ impl<'tok> Ident<'tok> {
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
         select! {
-            Token::Ident(str) => Ident(str),
+            normal!(Ident(s)) => Self(s),
         }
     }
 
@@ -90,7 +116,7 @@ impl<'tok> Ident<'tok> {
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
         select! {
-            Token::AtIdent(str) => Ident(str),
+            normal!(AtIdent(str)) => Self(str),
         }
     }
 }
@@ -102,28 +128,28 @@ impl<'tok> Lit<'tok> {
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
         select! {
-            Token::StringLit(str) => Lit::String(str),
+            normal!(StringLit(s)) => Lit::String(s),
         }
     }
 }
 
-impl<'tok> Command<'tok> {
+impl<'tok> Command<MaybeQuoted<'tok>> {
     fn parse<'src: 'tok, I>(
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        select! {
-            Token::Command(parts) => {
-                let parts = parts.iter().filter_map(|p| match p {
-                    CommandToken::UnquotedString(s) =>
-                    Some(CommandPart::Unquoted(s)),
-                    CommandToken::QuotedString(s) => Some(CommandPart::Quoted(s)),
-                    CommandToken::CommandEnd => None,
-                }).collect();
-                Command(parts)
-            }
-        }
+        let part = select! {
+            command!(UnquotedString(s)) => MaybeQuoted::Unquoted(s),
+            command!(QuotedString(s)) => MaybeQuoted::Quoted(s)
+        };
+        part.then(part.repeated().collect::<Vec<_>>())
+            .delimited_by(
+                just(normal!(CommandStart)),
+                just(command!(CommandEnd)),
+            )
+            .map(|(executable, args)| Command { executable, args })
+            .labelled("command")
     }
 }
 
@@ -135,17 +161,22 @@ impl<'tok> Expr<'tok> {
     {
         recursive(|expr| {
             let param_list = expr
-                .separated_by(just(Token::Comma))
+                .separated_by(just(normal!(Comma)))
                 .collect::<Vec<_>>()
-                .delimited_by(just(Token::ParenOpen), just(Token::ParenClose));
+                .delimited_by(
+                    just(normal!(ParenOpen)),
+                    just(normal!(ParenClose)),
+                );
             let fun_app = Ident::parse()
                 .then(param_list)
-                .map(|(ident, params)| Expr::FunApp(ident, params));
+                .map(|(ident, params)| ExprKind::FunApp(ident, params));
             Command::parse()
-                .map(Expr::Command)
+                .map(ExprKind::Command)
                 .or(fun_app)
-                .or(Lit::parse().map(Expr::Lit))
-                .or(Ident::parse().map(Expr::Ident))
+                .or(Lit::parse().map(ExprKind::Lit))
+                .or(Ident::parse().map(ExprKind::Ident))
+                .spanned()
+                .map(Expr)
         })
     }
 }
@@ -156,9 +187,9 @@ impl<'tok> Statement<'tok> {
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        let let_stmt = just(Token::Let)
-            .ignore_then(Ident::parse())
-            .then_ignore(just(Token::Equals))
+        let let_stmt = just(normal!(Let))
+            .ignore_then(Ident::parse().spanned())
+            .then_ignore(just(normal!(Equals)))
             .then(Expr::parse())
             .map(|(ident, expr)| Statement::Let(ident, expr));
         let_stmt.or(Expr::parse().map(Statement::Expr))
@@ -184,10 +215,7 @@ impl<'tok> Decl<'tok> {
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        let decls = Statement::parse()
-            .separated_by(just(Token::Semicolon))
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::BraceOpen), just(Token::BraceClose));
+        let decls = Block::parse();
         DeclHeader::parse()
             .then(decls)
             .map(|(header, definition)| Decl { header, definition })
@@ -209,9 +237,8 @@ impl<'tok> Ast<'tok> {
 
 pub fn parse_str<'a>(
     src: &'a str,
-) -> Result<Ast<'a>, Vec<chumsky::error::Rich<'a, lexer::Token<'a>>>> {
-    let token_iter = Token::lexer(src)
-        .spanned()
+) -> Result<Ast<'a>, Vec<chumsky::error::Rich<'a, Token<'a>>>> {
+    let token_iter = Tokenizer::new(src)
         // Convert logos errors into tokens. We want parsing to be recoverable and not fail at the lexing stage, so
         // we have a dedicated `Token::Error` variant that represents a token error that was previously encountered
         .map(|(tok, span)| match tok {
@@ -230,9 +257,25 @@ pub fn parse_str<'a>(
     Ast::parse().parse(token_stream).into_result()
 }
 
+pub fn report<'a>(
+    err: &Rich<'a, Token<'_>>,
+) -> Report<'a, ((), std::ops::Range<usize>)> {
+    Report::build(ReportKind::Error, ((), err.span().into_range()))
+        .with_config(
+            ariadne::Config::new().with_index_type(ariadne::IndexType::Byte),
+        )
+        .with_code(3)
+        .with_message(err.to_string())
+        .with_label(
+            Label::new(((), err.span().into_range()))
+                .with_message(err.reason().to_string())
+                .with_color(Color::Red),
+        )
+        .finish()
+}
+
 #[cfg(test)]
 mod test {
-    use super::*;
 
     use insta;
     use std::fs;

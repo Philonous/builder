@@ -18,6 +18,6 @@ target(docker-image) "app" {
   need("dist/exe");
 
   # Tag is inherited from resource, ${} is variable use/interpolation
-  `docker build -t ${target}`
+  `docker build -t "${target}"`
 
 }

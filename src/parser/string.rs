@@ -1,6 +1,12 @@
 use std::borrow::Cow;
 
-use super::error::ParseError;
+use thiserror::Error;
+
+#[derive(Debug, Error, PartialEq, Clone)]
+pub enum QuoteError {
+    #[error("unknown escape sequence: \\{0}")]
+    UnknownEscape(char),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Quoted<'a> {
@@ -32,7 +38,7 @@ impl<'a> Quoted<'a> {
     ///
     /// [`UnquoteError::UnknownEscape`] if `\` is followed by anything other
     /// than `\` or `close`.
-    pub fn unquote(&'a self) -> Result<Cow<'_, str>, ParseError> {
+    pub fn unquote(&self) -> Result<Cow<'a, str>, QuoteError> {
         let s = &self.raw;
         debug_assert!(s.starts_with(self.delim) && s.ends_with(self.delim));
         debug_assert!(s.len() >= self.delim.len_utf8() + self.delim.len_utf8());
@@ -56,7 +62,7 @@ impl<'a> Quoted<'a> {
                     Some('n') => out.push('\n'),
                     Some('t') => out.push('\t'),
                     Some(other) => {
-                        return Err(ParseError::UnknownEscape(other))
+                        return Err(QuoteError::UnknownEscape(other))
                     }
                     None => unreachable!(
                     "lexer bug: trailing backslash inside quoted literal — \

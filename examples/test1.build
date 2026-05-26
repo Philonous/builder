@@ -10,14 +10,15 @@
 
   # Actually build the code
   # command for runs the command
-  `ls`
+  `ls`;
+  `df -h`;
 
 }
 
-# target(docker-image) "app" {
-#   need("dist/exe");
-#
-#   # Tag is inherited from resource, ${} is variable use/interpolation
-#   `docker build -t ${target}`
-#
-# }
+target docker-image("app") {
+  need("dist/exe");
+
+  # Tag is inherited from resource, ${} is variable use/interpolation
+  `docker build -t "${target}"`
+
+}
