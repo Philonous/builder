@@ -2,8 +2,8 @@ use std::fmt;
 
 use logos::{Lexer, Logos, Span};
 
-use thiserror::Error;
 use super::string::Quoted;
+use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Clone, Default)]
 pub enum LexError {
@@ -20,7 +20,7 @@ pub enum NormalToken<'a> {
     Ident(&'a str),
 
     #[regex(r"@[.a-zA-Z][.a-zA-Z/-]*", |lex| &lex.slice()[1..])]
-    AtIdent(&'a str),
+    AtString(&'a str),
 
     #[token("(")]
     ParenOpen,
@@ -61,7 +61,7 @@ impl fmt::Display for NormalToken<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Ident(s) => write!(f, "{s}"),
-            Self::AtIdent(s) => write!(f, "@{s}"),
+            Self::AtString(s) => write!(f, "@{s}"),
             Self::ParenOpen => write!(f, "("),
             Self::ParenClose => write!(f, ")"),
             Self::BraceOpen => write!(f, "{{"),
@@ -72,7 +72,7 @@ impl fmt::Display for NormalToken<'_> {
             Self::StringLit(s) => {
                 let sraw = s.raw;
                 write!(f, "{sraw}")
-            },
+            }
             Self::CommandStart => write!(f, "`"),
             Self::Let => write!(f, "let"),
             Self::Comment => write!(f, "#"),
@@ -98,8 +98,9 @@ impl fmt::Display for CommandToken<'_> {
         match self {
             Self::UnquotedString(s) => write!(f, "{s}"),
             Self::QuotedString(s) => {
-                let sraw=s.raw;
-                write!(f, "{sraw}")}
+                let sraw = s.raw;
+                write!(f, "{sraw}")
+            }
             Self::CommandEnd => Ok(()),
         }
     }
@@ -109,7 +110,7 @@ impl fmt::Display for CommandToken<'_> {
 pub enum Token<'a> {
     Normal(NormalToken<'a>),
     Command(CommandToken<'a>),
-        // Error token, never produced directly. We synthesize it as a
+    // Error token, never produced directly. We synthesize it as a
     // marker for chumsky to consume when lexing fails
     Error,
 }
@@ -137,7 +138,7 @@ macro_rules! normal {
     };
 }
 
-pub (crate) use normal;
+pub(crate) use normal;
 
 macro_rules! command {
     // normal!(Semicolon)
@@ -150,26 +151,26 @@ macro_rules! command {
     };
 }
 
-pub (crate) use command;
+pub(crate) use command;
 
 #[derive(Clone, Copy, Debug)]
-enum Mode { Normal, Command }
+enum Mode {
+    Normal,
+    Command,
+}
 
 #[derive(Debug, Default)]
 enum LexerState<'a> {
     Normal(Lexer<'a, NormalToken<'a>>),
     Command(Lexer<'a, CommandToken<'a>>),
-    #[default] Taken,
+    #[default]
+    Taken,
 }
-
-
 
 pub struct Tokenizer<'a> {
     current: LexerState<'a>,
-    stack:   Vec<Mode>,        // modes to return to, deepest first
+    stack: Vec<Mode>, // modes to return to, deepest first
 }
-
-
 
 // macro_rules! advance {
 //     ($self:expr, $lexer:expr,
@@ -192,12 +193,11 @@ pub struct Tokenizer<'a> {
 //     }};
 // }
 
-
 // transforms the current state by pooping a state from the state stack
 macro_rules! pop_to {
     ($stack:expr, $lexer:expr) => {
         match $stack.pop().expect("pop on empty mode stack") {
-            Mode::Normal  => LexerState::Normal($lexer.morph()),
+            Mode::Normal => LexerState::Normal($lexer.morph()),
             Mode::Command => LexerState::Command($lexer.morph()),
         }
     };
@@ -239,8 +239,10 @@ macro_rules! advance {
 
 impl<'a> Tokenizer<'a> {
     pub fn new(source: &'a str) -> Self {
-        Tokenizer{ current: LexerState::Normal(NormalToken::lexer(source))
-            , stack: Vec::new() }
+        Tokenizer {
+            current: LexerState::Normal(NormalToken::lexer(source)),
+            stack: Vec::new(),
+        }
     }
 }
 
@@ -260,12 +262,10 @@ impl<'a> Iterator for Tokenizer<'a> {
                 state Command, wrap Command,
                 on CommandToken::CommandEnd => (leave)
             ),
-            LexerState::Taken => unreachable!("Taken seen between next calls")
+            LexerState::Taken => unreachable!("Taken seen between next calls"),
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod test {
@@ -279,7 +279,7 @@ mod test {
         insta::glob!("test/lexer", "*.in", |path| {
             let src = fs::read_to_string(path).expect("Failed to read file");
             let tokens: Vec<(Result<Token, _>, Span)> =
-            Tokenizer::new(src.as_str()).collect();
+                Tokenizer::new(src.as_str()).collect();
 
             insta::assert_debug_snapshot!(
                 path.file_stem().unwrap().to_str().unwrap(),

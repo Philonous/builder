@@ -18,3 +18,13 @@ pub enum Value<'a> {
     Unit,
     String(Cow<'a, str>),
 }
+
+impl<'a> std::fmt::Display for Value<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Unit => write!(f, "()"),
+            // Todo: String quoting
+            Value::String(cow) => write!(f, "{}", *cow),
+        }
+    }
+}

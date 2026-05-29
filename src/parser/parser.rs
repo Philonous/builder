@@ -48,11 +48,49 @@ impl<'a> Command<MaybeQuoted<'a>> {
 }
 
 #[derive(Clone, PartialEq, Debug)]
+pub enum Argument<'a> {
+    Bare(Expr<'a>),
+    Named { name: Ident<'a>, value: Expr<'a> },
+}
+
+impl<'tok> Argument<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        Ident::parse()
+            .then_ignore(just(normal!(Equals)))
+            .then(Expr::parse())
+            .map(|(name, value)| Argument::Named { name, value })
+            .or(Expr::parse().map(Argument::Bare))
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct Arguments<'a>(pub Vec<Spanned<Argument<'a>>>);
+
+impl<'tok> Arguments<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        Argument::parse()
+            .spanned()
+            .separated_by(just(normal!(Comma)))
+            .collect()
+            .delimited_by(just(normal!(ParenOpen)), just(normal!(ParenClose)))
+            .map(Arguments)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum ExprKind<'a> {
     Lit(Lit<'a>),
     Ident(Ident<'a>),
     Command(Command<MaybeQuoted<'a>>),
-    FunApp(Ident<'a>, Vec<Expr<'a>>),
+    FunApp(Ident<'a>, Arguments<'a>),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -64,11 +102,55 @@ pub enum Statement<'a> {
     Expr(Expr<'a>),
 }
 
+// Like Argument, but only allows literals, e.g. for constant contexts
+#[derive(Clone, PartialEq, Debug)]
+pub enum LitArgument<'a> {
+    Bare(Lit<'a>),
+    Named { name: Ident<'a>, value: Lit<'a> },
+}
+
+impl<'tok> LitArgument<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        Ident::parse()
+            .then_ignore(just(normal!(Equals)))
+            .then(Lit::parse())
+            .map(|(name, value)| LitArgument::Named { name, value })
+            .or(Lit::parse().map(LitArgument::Bare))
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct LitArguments<'a>(pub Vec<Spanned<LitArgument<'a>>>);
+
+impl<'tok> LitArguments<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        LitArgument::parse()
+            .spanned()
+            .separated_by(just(normal!(Comma)))
+            .collect()
+            .delimited_by(just(normal!(ParenOpen)), just(normal!(ParenClose)))
+            .map(LitArguments)
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum DeclHeader<'a> {
     /// Type and definition, e.g. "target" and "file("dist/exe")
-    Explicit(Expr<'a>, Expr<'a>), // E.g. target file("dist/exe")
-    AtDecl(Ident<'a>), // E.g. @dist/exe
+    Explicit {
+        decl: Spanned<Ident<'a>>,
+        decl_args: LitArguments<'a>,
+        name: Spanned<Ident<'a>>, // E.g. target file("dist/exe")
+        args: LitArguments<'a>,
+    },
+    AtDecl(&'a str), // E.g. @dist/exe
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -88,6 +170,8 @@ impl<'tok> Block<'tok> {
     }
 }
 
+// TODO: This assumes all decls have target-shape, need to allow
+// functions and constants at least
 #[derive(Clone, PartialEq, Debug)]
 pub struct Decl<'a> {
     pub header: DeclHeader<'a>,
@@ -107,16 +191,6 @@ impl<'tok> Ident<'tok> {
     {
         select! {
             normal!(Ident(s)) => Self(s),
-        }
-    }
-
-    fn at<'src: 'tok, I>(
-    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
-    where
-        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
-    {
-        select! {
-            normal!(AtIdent(str)) => Self(str),
         }
     }
 }
@@ -160,15 +234,9 @@ impl<'tok> Expr<'tok> {
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
         recursive(|expr| {
-            let param_list = expr
-                .separated_by(just(normal!(Comma)))
-                .collect::<Vec<_>>()
-                .delimited_by(
-                    just(normal!(ParenOpen)),
-                    just(normal!(ParenClose)),
-                );
+            let arg_list = Arguments::parse();
             let fun_app = Ident::parse()
-                .then(param_list)
+                .then(arg_list)
                 .map(|(ident, params)| ExprKind::FunApp(ident, params));
             Command::parse()
                 .map(ExprKind::Command)
@@ -202,10 +270,19 @@ impl<'tok> DeclHeader<'tok> {
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        let explicit = Expr::parse()
-            .then(Expr::parse())
-            .map(|(typ, decl)| Self::Explicit(typ, decl));
-        Ident::at().map(DeclHeader::AtDecl).or(explicit)
+        let explicit = Ident::parse()
+            .spanned()
+            .then(LitArguments::parse())
+            .then(Ident::parse().spanned())
+            .then(LitArguments::parse())
+            .map(|(((decl, decl_args), name), args)| Self::Explicit {
+                decl,
+                decl_args,
+                name,
+                args,
+            });
+        let at_decl = select! { normal!(AtString(s)) => DeclHeader::AtDecl(s) };
+        at_decl.or(explicit)
     }
 }
 

@@ -56,7 +56,7 @@ impl<'a> Expr<'a> {
                     executable: executable.clone(),
                     args: args.clone(),
                 };
-                cmd.exe().with_span(self.span)?;
+                cmd.exe().with_span_from(self.span)?;
                 Value::Unit
             }
         })
@@ -95,10 +95,10 @@ pub struct Slot<'a> {
     pub value: Option<Value<'a>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Slots<'a>(pub Vec<Slot<'a>>);
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Block<'a> {
     pub statements: Vec<Statement<'a>>,
     pub empty_slots: Slots<'a>,

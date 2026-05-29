@@ -1,5 +1,9 @@
 use super::model::eval;
+use super::model::parameters;
+use super::model::target;
 use super::parser::parser;
+use crate::error::AddErrors;
+use crate::error::Errors;
 use crate::error::WithSpan;
 use crate::{
     common::Ident,
@@ -8,16 +12,26 @@ use crate::{
     parser::string::QuoteError,
 };
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("Variable {0} was already declared")]
+    #[error("variable {0} was already declared")]
     DuplicateVariable(String),
-    #[error("Variable {0} used before being declared")]
+    #[error("variable {0} used before being declared")]
     UndefinedVariable(String),
     #[error("{0}")]
     QuoteError(#[from] QuoteError),
+    #[error("unknown declaration {0}")]
+    UnknownDecl(String),
+    #[error("unknown target type {0}")]
+    UnknownTargetType(String),
+    #[error("{0}")]
+    ParamMatchError(#[from] parameters::MatchError),
+    #[error("positional parameter {0} after key-value")]
+    ParamBareAfterKv(String),
 }
 
 impl<'a> Slots<'a> {
@@ -110,7 +124,13 @@ impl<'a, 'b> Drop for ScopeGuard<'a, 'b> {
     }
 }
 
-// impl<'a> Scopes<'a> {}
+impl<'a> parser::Lit<'a> {
+    pub fn resolve<'b>(self) -> Result<eval::Value<'a>, Error> {
+        Ok(match self {
+            parser::Lit::String(s) => eval::Value::String(s.unquote()?),
+        })
+    }
+}
 
 impl<'a> parser::Expr<'a> {
     pub fn resolve<'b>(
@@ -119,11 +139,9 @@ impl<'a> parser::Expr<'a> {
     ) -> Result<eval::Expr<'a>, Spanned<Error>> {
         let span = self.0.span.into();
         let kind = match self.0.inner {
-            parser::ExprKind::Lit(lit) => match lit {
-                parser::Lit::String(s) => eval::ExprKind::Lit(
-                    eval::Value::String(s.unquote().with_span(span)?),
-                ),
-            },
+            parser::ExprKind::Lit(lit) => {
+                eval::ExprKind::Lit(lit.resolve().with_span_from(span)?)
+            }
 
             parser::ExprKind::Ident(name) => scopes
                 .find_variable(&name)
@@ -134,10 +152,42 @@ impl<'a> parser::Expr<'a> {
                 .map(|parser::Command { executable, args }| {
                     eval::ExprKind::Command { executable, args }
                 })
-                .with_span(span)?,
+                .with_span_from(span)?,
             parser::ExprKind::FunApp(ident, exprs) => unimplemented!(),
         };
         Ok(eval::Expr { kind, span })
+    }
+}
+
+impl<'a> parser::LitArguments<'a> {
+    pub fn resolve<'b>(
+        self,
+    ) -> Result<parameters::Arguments<'a>, Spanned<Error>> {
+        let mut positional = Vec::new();
+        let mut key_value = Vec::new();
+        // Resolve literals in argument position and check that
+        // positional arguments don't occur after key-value arguments
+        for arg in self.0 {
+            let span = arg.span;
+            match arg.inner {
+                parser::LitArgument::Bare(lit) => {
+                    let val = lit.resolve().with_span(span)?;
+                    if key_value.len() > 0 {
+                        return Err(Error::ParamBareAfterKv(val.to_string()))
+                            .with_span(arg.span);
+                    }
+                    positional.push(val);
+                }
+                parser::LitArgument::Named { name, value } => {
+                    let val = value.resolve().with_span(span)?;
+                    key_value.push((name, val));
+                }
+            }
+        }
+        Ok(parameters::Arguments {
+            positional,
+            key_value,
+        })
     }
 }
 
@@ -176,6 +226,98 @@ impl<'a> parser::Block<'a> {
             statements: resolved,
             empty_slots: this.detach(),
         })
+    }
+}
+
+// All decls are targets for now
+impl<'a> parser::Decl<'a> {
+    pub fn resolve<'scopes>(
+        self,
+        outer: &mut Scopes<'a, 'scopes>,
+        target_types: &[target::TargetType<'a>],
+    ) -> Result<target::Target<'a>, Errors<Error>> {
+        // TODO: Find target type in global dictionary
+
+        let mut errors: Errors<Error> = Errors::empty();
+
+        let mut guard = outer.enter();
+        let block = self
+            .definition
+            .resolve(guard.borrowed())
+            .add_errors(&mut errors)
+            .unwrap_or_default();
+
+        match self.header {
+            // @file style target declaration
+            parser::DeclHeader::AtDecl(s) => target::Target {
+                kind: &target::TARGET_TYPE_FILE,
+                args: HashMap::from([(
+                    Ident("path"),
+                    eval::Value::String(Cow::Borrowed(s)),
+                )]),
+                commands: block,
+            },
+            // Explicit declaration
+            parser::DeclHeader::Explicit {
+                decl,
+                decl_args,
+                name,
+                args,
+            } => match decl.inner {
+                Ident("target") => {
+                    // Look up target type from list
+                    let target_type = target_types
+                        .iter()
+                        .find(|tt| tt.name == name.inner)
+                        .ok_or(Error::UnknownTargetType(name.inner.to_string()))
+                        .with_span(name.span)
+                        .add_errors(&mut errors);
+
+                    // Resolve arguments
+                    let args_resolved = args.resolve().add_errors(&mut errors);
+                    match target_type.zip(args_resolved) {
+                        // Previous error, skip checking arguments
+                        None => {
+                            // Errors must already have been set, so
+                            // we simply return a dummy variable
+                            Default::default()
+                        }
+
+                        // Match arguments to parameters
+                        Some((target_type, args_resolved)) => {
+                            let args = target_type
+                                .parameters
+                                .match_arguments(&args_resolved)
+                                .map_err(|errs| {
+                                    errs.into_iter()
+                                        .map(WithSpan::without_span)
+                                        .collect()
+                                })
+                                .add_errors(&mut errors)
+                                .unwrap_or_default();
+
+                            target::Target {
+                                kind: &target_type,
+                                args,
+                                commands: block,
+                            }
+                        }
+                    }
+                }
+                // Unknown decl types
+                Ident(name) => {
+                    Err(Error::UnknownDecl(name.to_string()))
+                        .with_span(decl.span)
+                        .add_errors(&mut errors);
+                    return Err(errors);
+                }
+            },
+        };
+
+        // Target may want to set special parameters, e.g. resolved path
+
+        // Ok(target::Target { kind: self })
+        todo!()
     }
 }
 
