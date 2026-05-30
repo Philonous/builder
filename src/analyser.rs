@@ -176,11 +176,11 @@ impl<'a> parser::LitArguments<'a> {
                         return Err(Error::ParamBareAfterKv(val.to_string()))
                             .with_span(arg.span);
                     }
-                    positional.push(val);
+                    positional.push(Spanned::spanned(val, arg.span));
                 }
                 parser::LitArgument::Named { name, value } => {
                     let val = value.resolve().with_span(span)?;
-                    key_value.push((name, val));
+                    key_value.push(Spanned::spanned((name, val), arg.span));
                 }
             }
         }
@@ -234,7 +234,7 @@ impl<'a> parser::Decl<'a> {
     pub fn resolve<'scopes>(
         self,
         outer: &mut Scopes<'a, 'scopes>,
-        target_types: &[target::TargetType<'a>],
+        target_types: &'a [target::TargetType<'a>],
     ) -> Result<target::Target<'a>, Errors<Error>> {
         // TODO: Find target type in global dictionary
 
@@ -247,19 +247,26 @@ impl<'a> parser::Decl<'a> {
             .add_errors(&mut errors)
             .unwrap_or_default();
 
-        match self.header {
+        let target = match self.header {
             // @file style target declaration
-            parser::DeclHeader::AtDecl(s) => target::Target {
-                kind: &target::TARGET_TYPE_FILE,
-                args: HashMap::from([(
+            parser::DeclHeader::AtDecl(s) => {
+                let kind = &target::TARGET_TYPE_FILE;
+                let args = HashMap::from([(
                     Ident("path"),
                     eval::Value::String(Cow::Borrowed(s)),
-                )]),
-                commands: block,
-            },
+                )]);
+                let name = args.get(&kind.name_is).unwrap().to_string();
+                target::Target {
+                    kind,
+                    args,
+                    name,
+                    commands: block,
+                }
+            }
             // Explicit declaration
             parser::DeclHeader::Explicit {
                 decl,
+                // TODO: handle decl args
                 decl_args,
                 name,
                 args,
@@ -288,43 +295,70 @@ impl<'a> parser::Decl<'a> {
                             let args = target_type
                                 .parameters
                                 .match_arguments(&args_resolved)
-                                .map_err(|errs| {
-                                    errs.into_iter()
-                                        .map(WithSpan::without_span)
-                                        .collect()
-                                })
-                                .add_errors(&mut errors)
-                                .unwrap_or_default();
-
-                            target::Target {
-                                kind: &target_type,
-                                args,
-                                commands: block,
+                                .add_errors(&mut errors);
+                            match args {
+                                None => Default::default(),
+                                Some(args) => {
+                                    let name = args
+                                        .get(&target_type.name_is)
+                                        // TODO: This needs to be
+                                        // handled differently when we
+                                        // allow custom target types
+                                        .expect("Target name not found")
+                                        .to_string();
+                                    target::Target {
+                                        kind: &target_type,
+                                        args,
+                                        commands: block,
+                                        name,
+                                    }
+                                }
                             }
                         }
                     }
                 }
                 // Unknown decl types
                 Ident(name) => {
-                    Err(Error::UnknownDecl(name.to_string()))
-                        .with_span(decl.span)
-                        .add_errors(&mut errors);
-                    return Err(errors);
+                    let _: Option<()> =
+                        Err(Error::UnknownDecl(name.to_string()))
+                            .with_span(decl.span)
+                            .add_errors(&mut errors);
+                    Default::default()
                 }
             },
         };
-
+        if errors.0.len() > 0 {
+            Err(errors)
+        } else {
+            Ok(target)
+        }
         // Target may want to set special parameters, e.g. resolved path
 
         // Ok(target::Target { kind: self })
-        todo!()
     }
 }
 
-// impl<'a> parser::Decl<'a> {
-//     pub fn resolve<'scopes>(
-//         self,
-//         outer: &mut Scopes<'a, 'scopes>,
-//     ) -> Result<eval::Decl<'a>, Spanned<Error>> {
-//     }
-// }
+static TARGET_TYPES: &[target::TargetType<'static>] =
+    &[target::TARGET_TYPE_FILE, target::TARGET_TYPE_TASK];
+
+impl<'a> parser::Ast<'a> {
+    pub fn resolve(self) -> Result<Vec<target::Target<'a>>, Errors<Error>> {
+        let mut errors = Errors::empty();
+        let mut decls = Vec::with_capacity(self.decls.len());
+        let mut scopes = Vec::new();
+
+        for decl in self.decls {
+            decls.push(
+                decl.resolve(&mut Scopes(&mut scopes), TARGET_TYPES)
+                    .add_errors(&mut errors)
+                    .unwrap_or_default(),
+            );
+        }
+
+        if errors.0.len() > 0 {
+            Err(errors)
+        } else {
+            Ok(decls)
+        }
+    }
+}

@@ -20,6 +20,7 @@
 
                  pkgs.go-task
                  pkgs.rust-analyzer
+                 pkgs.gdb
                ] ;
 
       in

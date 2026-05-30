@@ -54,16 +54,19 @@ pub enum Argument<'a> {
 }
 
 impl<'tok> Argument<'tok> {
-    fn parse<'src: 'tok, I>(
+    fn parse<'src: 'tok, I, E>(
+        expr: E,
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>>
+            + Clone,
     {
         Ident::parse()
             .then_ignore(just(normal!(Equals)))
-            .then(Expr::parse())
+            .then(expr.clone())
             .map(|(name, value)| Argument::Named { name, value })
-            .or(Expr::parse().map(Argument::Bare))
+            .or(expr.map(Argument::Bare))
     }
 }
 
@@ -71,12 +74,15 @@ impl<'tok> Argument<'tok> {
 pub struct Arguments<'a>(pub Vec<Spanned<Argument<'a>>>);
 
 impl<'tok> Arguments<'tok> {
-    fn parse<'src: 'tok, I>(
+    fn parse<'src: 'tok, I, E>(
+        expr: E,
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>>
+            + Clone,
     {
-        Argument::parse()
+        Argument::parse(expr)
             .spanned()
             .separated_by(just(normal!(Comma)))
             .collect()
@@ -84,7 +90,6 @@ impl<'tok> Arguments<'tok> {
             .map(Arguments)
     }
 }
-
 #[derive(Clone, PartialEq, Debug)]
 pub enum ExprKind<'a> {
     Lit(Lit<'a>),
@@ -234,7 +239,7 @@ impl<'tok> Expr<'tok> {
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
         recursive(|expr| {
-            let arg_list = Arguments::parse();
+            let arg_list = Arguments::parse(expr);
             let fun_app = Ident::parse()
                 .then(arg_list)
                 .map(|(ident, params)| ExprKind::FunApp(ident, params));
@@ -332,23 +337,6 @@ pub fn parse_str<'a>(
         .map((0..src.len()).into(), |(t, s): (_, _)| (t, s));
     // Parse the token stream with our chumsky parser
     Ast::parse().parse(token_stream).into_result()
-}
-
-pub fn report<'a>(
-    err: &Rich<'a, Token<'_>>,
-) -> Report<'a, ((), std::ops::Range<usize>)> {
-    Report::build(ReportKind::Error, ((), err.span().into_range()))
-        .with_config(
-            ariadne::Config::new().with_index_type(ariadne::IndexType::Byte),
-        )
-        .with_code(3)
-        .with_message(err.to_string())
-        .with_label(
-            Label::new(((), err.span().into_range()))
-                .with_message(err.reason().to_string())
-                .with_color(Color::Red),
-        )
-        .finish()
 }
 
 #[cfg(test)]

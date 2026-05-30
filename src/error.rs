@@ -1,9 +1,19 @@
+use std::ops::Range;
+
+use ariadne::{Color, Config, IndexType, Label, Report, ReportKind};
+use chumsky::error::Rich;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
+}
+
+impl Span {
+    pub fn to_range(&self) -> Range<usize> {
+        self.start..self.end
+    }
 }
 
 impl From<chumsky::span::SimpleSpan> for Span {
@@ -44,6 +54,13 @@ impl<I> Spanned<I> {
     {
         self.map(Into::into)
     }
+
+    pub fn spanned<T: Into<Span>>(inner: I, span: T) -> Self {
+        Self {
+            inner,
+            span: Some(span.into()),
+        }
+    }
 }
 
 impl<E> std::fmt::Display for Spanned<E>
@@ -63,6 +80,8 @@ pub trait WithSpan<T, E> {
 
     fn with_span<S: Into<Span>>(self, span: S) -> Result<T, Spanned<E>>;
 
+    fn with_opt_span(self, span: Option<Span>) -> Result<T, Spanned<E>>;
+
     fn without_span(self) -> Result<T, Spanned<E>>;
 }
 
@@ -81,6 +100,9 @@ impl<T, E> WithSpan<T, E> for Result<T, E> {
             span: Some(span.into()),
             inner: error,
         })
+    }
+    fn with_opt_span(self, span: Option<Span>) -> Result<T, Spanned<E>> {
+        self.map_err(|error| Spanned { span, inner: error })
     }
     fn without_span(self) -> Result<T, Spanned<E>> {
         self.map_err(|error| Spanned {
@@ -159,3 +181,59 @@ macro_rules! try_errors {
 }
 
 pub(crate) use try_errors;
+
+pub trait ToRange {
+    fn to_range(&self) -> Option<Range<usize>>;
+}
+
+impl<'a, T> ToRange for Rich<'a, T> {
+    fn to_range(&self) -> Option<Range<usize>> {
+        Some(self.span().into_range())
+    }
+}
+
+impl<T> ToRange for Spanned<T> {
+    fn to_range(&self) -> Option<Range<usize>> {
+        self.span.map(|s| s.to_range())
+    }
+}
+
+pub trait ToMessage {
+    fn to_message(&self) -> String;
+}
+
+impl<'a, T: std::fmt::Display> ToMessage for Rich<'a, T> {
+    fn to_message(&self) -> String {
+        self.reason().to_string()
+    }
+}
+
+impl<'a, T: std::fmt::Display> ToMessage for Spanned<T> {
+    fn to_message(&self) -> String {
+        self.inner.to_string()
+    }
+}
+
+pub fn report<'a, E: ToMessage + ToRange>(
+    err: &E,
+) -> Report<'a, ((), Range<usize>)> {
+    let range = err.to_range();
+    // Report::build needs *a* location even with no label; the file start is the
+    // least-misleading default.
+    let location = ((), range.clone().unwrap_or(0..0));
+
+    let mut builder = Report::build(ReportKind::Error, location)
+        .with_config(Config::new().with_index_type(IndexType::Byte))
+        .with_code(3)
+        .with_message(err.to_message());
+
+    if let Some(range) = range {
+        builder = builder.with_label(
+            Label::new(((), range))
+                .with_message(err.to_message())
+                .with_color(Color::Red),
+        );
+    }
+
+    builder.finish()
+}

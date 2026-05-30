@@ -1,5 +1,5 @@
 //! Handling of parameters and arguments
-use crate::error::{Spanned, WithSpan};
+use crate::error::{AddErrors, Errors, Span, Spanned, WithSpan};
 use std::{
     collections::{HashMap, HashSet},
     ops::Deref,
@@ -11,6 +11,7 @@ use super::base::{Ident, Value};
 #[derive(Debug, PartialEq, Clone)]
 pub struct Parameter<'a> {
     pub default: Option<Value<'a>>,
+    pub span: Option<Span>,
 }
 
 // Custom enum to deal with lifetime variance
@@ -45,8 +46,8 @@ pub struct Parameters<'a>(pub CowSlice<'a, (Ident<'a>, Parameter<'a>)>);
 
 #[derive(Debug, Default)]
 pub struct Arguments<'a> {
-    pub positional: Vec<Value<'a>>,
-    pub key_value: Vec<(Ident<'a>, Value<'a>)>,
+    pub positional: Vec<Spanned<Value<'a>>>,
+    pub key_value: Vec<Spanned<(Ident<'a>, Value<'a>)>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,34 +70,46 @@ impl<'a> Parameters<'a> {
     pub fn match_arguments(
         &self,
         args: &Arguments<'a>,
-    ) -> Result<HashMap<Ident<'a>, Value<'a>>, Vec<Spanned<MatchError>>> {
-        let mut errors = Vec::new();
+    ) -> Result<HashMap<Ident<'a>, Value<'a>>, Errors<MatchError>> {
+        let mut errors = Errors::empty();
         let mut out: HashMap<Ident<'a>, Value<'a>> =
             HashMap::with_capacity(self.0.len());
 
         // 1. Positional: bind what fits; the first `n` params are the bound ones.
         let n = self.0.len().min(args.positional.len());
-        for ((name, _), value) in self.0.iter().zip(&args.positional[..n]) {
-            out.insert(name.clone(), value.clone());
+        for ((name, _), arg) in self.0.iter().zip(&args.positional[..n]) {
+            out.insert(name.clone(), arg.inner.clone());
         }
         if args.positional.len() > self.0.len() {
-            errors.push(MatchError::TooManyPositional {
+            let span = args.positional[self.0.len()].span;
+            let _: Option<()> = Err(MatchError::TooManyPositional {
                 expected: self.0.len(),
                 got: args.positional.len(),
-            });
+            })
+            .with_opt_span(span)
+            .add_errors(&mut errors);
         }
 
         // 2. Keyword, in source order: repeated / unknown / clashes-with-positional.
         let mut seen: HashSet<&Ident<'a>> = HashSet::new();
-        for (name, value) in &args.key_value {
+        for arg in &args.key_value {
+            let (name, value) = &arg.inner;
+            let span = arg.span;
             if !seen.insert(name) {
-                // same keyword supplied earlier in the list
-                errors.push(MatchError::RepeatedKeyword(name.to_string()));
+                let _: Option<()> =
+                    Err(MatchError::RepeatedKeyword(name.to_string()))
+                        .with_opt_span(span)
+                        .add_errors(&mut errors);
             } else if !self.0.iter().any(|(p, _)| p == name) {
-                errors.push(MatchError::UnknownKeyword(name.to_string()));
+                let _: Option<()> =
+                    Err(MatchError::UnknownKeyword(name.to_string()))
+                        .with_opt_span(span)
+                        .add_errors(&mut errors);
             } else if self.0[..n].iter().any(|(p, _)| p == name) {
-                // positional + kw
-                errors.push(MatchError::DuplicateArgument(name.to_string()));
+                let _: Option<()> =
+                    Err(MatchError::DuplicateArgument(name.to_string()))
+                        .with_opt_span(span)
+                        .add_errors(&mut errors);
             } else {
                 out.insert(name.clone(), value.clone());
             }
@@ -107,9 +120,10 @@ impl<'a> Parameters<'a> {
             if !out.contains_key(name) {
                 match &param.default {
                     None => {
-                        errors.push(MatchError::MissingRequired(
-                            name.to_string(),
-                        ));
+                        let _: Option<()> =
+                            Err(MatchError::MissingRequired(name.to_string()))
+                                .without_span()
+                                .add_errors(&mut errors);
                     }
                     Some(default) => {
                         out.insert(name.clone(), default.clone());
@@ -118,7 +132,7 @@ impl<'a> Parameters<'a> {
             }
         }
 
-        if errors.is_empty() {
+        if errors.0.is_empty() {
             Ok(out)
         } else {
             Err(errors)
