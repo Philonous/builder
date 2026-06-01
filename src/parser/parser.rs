@@ -15,6 +15,14 @@ pub enum Lit<'a> {
     String(Quoted<'a>),
 }
 
+impl<'a> std::fmt::Display for Lit<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::String(str) => write!(f, "{}", str),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum MaybeQuoted<'a> {
     Unquoted(&'a str),
@@ -147,13 +155,85 @@ impl<'tok> LitArguments<'tok> {
 }
 
 #[derive(Clone, PartialEq, Debug)]
+pub enum PatternKind<'a> {
+    Lit(Lit<'a>),
+    Bind(Ident<'a>),
+}
+
+impl<'a> std::fmt::Display for PatternKind<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lit(lit) => {
+                write!(f, "{}", lit)
+            }
+            Self::Bind(var) => {
+                write!(f, "{}", var)
+            }
+        }
+    }
+}
+
+impl<'tok> PatternKind<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        let bind = Ident::parse().map(Self::Bind);
+        let lit = Lit::parse().map(Self::Lit);
+        bind.or(lit)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum Pattern<'a> {
+    Bare(PatternKind<'a>),
+    Named {
+        name: Ident<'a>,
+        pattern: PatternKind<'a>,
+    },
+}
+
+impl<'tok> Pattern<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        Ident::parse()
+            .then_ignore(just(normal!(Equals)))
+            .then(PatternKind::parse())
+            .map(|(name, pattern)| Self::Named { name, pattern })
+            .or(PatternKind::parse().map(Self::Bare))
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct Patterns<'a>(pub Vec<Spanned<Pattern<'a>>>);
+
+impl<'tok> Patterns<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        Pattern::parse()
+            .spanned()
+            .separated_by(just(normal!(Comma)))
+            .collect()
+            .delimited_by(just(normal!(ParenOpen)), just(normal!(ParenClose)))
+            .map(Patterns)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum DeclHeader<'a> {
     /// Type and definition, e.g. "target" and "file("dist/exe")
     Explicit {
         decl: Spanned<Ident<'a>>,
         decl_args: LitArguments<'a>,
         name: Spanned<Ident<'a>>, // E.g. target file("dist/exe")
-        args: LitArguments<'a>,
+        pattern: Patterns<'a>,
     },
     AtDecl(&'a str), // E.g. @dist/exe
 }
@@ -279,12 +359,12 @@ impl<'tok> DeclHeader<'tok> {
             .spanned()
             .then(LitArguments::parse())
             .then(Ident::parse().spanned())
-            .then(LitArguments::parse())
-            .map(|(((decl, decl_args), name), args)| Self::Explicit {
+            .then(Patterns::parse())
+            .map(|(((decl, decl_args), name), pattern)| Self::Explicit {
                 decl,
                 decl_args,
                 name,
-                args,
+                pattern,
             });
         let at_decl = select! { normal!(AtString(s)) => DeclHeader::AtDecl(s) };
         at_decl.or(explicit)

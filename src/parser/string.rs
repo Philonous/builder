@@ -14,6 +14,12 @@ pub struct Quoted<'a> {
     pub raw: &'a str,
 }
 
+impl<'a> std::fmt::Display for Quoted<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.raw)
+    }
+}
+
 impl<'a> Quoted<'a> {
     /// Strips the surrounding `open`/`close` quotes from a lexer-produced
     /// literal and resolves `\\` and `\<close>`.

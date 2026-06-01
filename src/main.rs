@@ -84,12 +84,10 @@ fn main() {
         Command::Dump => {
             println!("{:?}", decls)
         }
-        Command::Run { items } => {
-            println!("run    items={items:?} file={file:?}")
-        }
+        Command::Run { items } => for item in items {},
         Command::Targets => {
             for decl in decls {
-                println!("{}", decl.name)
+                println!("{:?}", decl.name);
             }
         }
     }

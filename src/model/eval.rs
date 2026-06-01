@@ -105,7 +105,7 @@ pub struct Block<'a> {
 }
 
 impl<'a> Block<'a> {
-    fn run<'outer>(
+    pub fn run<'outer>(
         &self,
         ctx: &mut EvalContext<'outer, 'a>,
     ) -> Result<Value<'a>, error::Spanned<Error>> {
@@ -124,8 +124,9 @@ impl<'a> Block<'a> {
 }
 
 #[derive(Debug)]
-struct EvalContext<'outer, 'a> {
-    variables: &'outer mut Vec<Slots<'a>>,
+pub struct EvalContext<'outer, 'a> {
+    // TODO: constants
+    pub variables: &'outer mut Vec<Slots<'a>>,
 }
 
 impl<'outer, 'a> Drop for EvalContext<'outer, 'a> {

@@ -37,6 +37,9 @@ pub enum NormalToken<'a> {
     #[token("=")]
     Equals,
 
+    #[token("_")]
+    Underscore,
+
     // Literals
 
     // Taken from https://logos.maciej.codes/examples/json.html
@@ -69,6 +72,7 @@ impl fmt::Display for NormalToken<'_> {
             Self::Semicolon => write!(f, ";"),
             Self::Comma => write!(f, ","),
             Self::Equals => write!(f, "="),
+            Self::Underscore => write!(f, "_"),
             Self::StringLit(s) => {
                 let sraw = s.raw;
                 write!(f, "{sraw}")

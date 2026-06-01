@@ -40,14 +40,47 @@ impl<'a, T> Deref for CowSlice<'a, T> {
     }
 }
 
-// Expected parameters (e.g. of a function), in order
 #[derive(Debug, Default)]
 pub struct Parameters<'a>(pub CowSlice<'a, (Ident<'a>, Parameter<'a>)>);
 
 #[derive(Debug, Default)]
-pub struct Arguments<'a> {
-    pub positional: Vec<Spanned<Value<'a>>>,
-    pub key_value: Vec<Spanned<(Ident<'a>, Value<'a>)>>,
+pub struct ArgumentSchema<'a, V> {
+    pub positional: Vec<Spanned<V>>,
+    pub key_value: Vec<Spanned<(Ident<'a>, V)>>,
+}
+
+pub type Arguments<'a> = ArgumentSchema<'a, Value<'a>>;
+
+#[derive(Debug, Clone)]
+pub enum Pattern<'a> {
+    Literal(Value<'a>),
+    Bind(Ident<'a>),
+    Wildcard,
+}
+
+impl<'a> Pattern<'a> {
+    pub fn matches(&self, v: &Value<'a>) -> bool {
+        match self {
+            Pattern::Bind(_) => true,
+            Pattern::Literal(l) => l == v,
+            Pattern::Wildcard => true,
+        }
+    }
+}
+
+pub type PatternArguments<'a> = ArgumentSchema<'a, Pattern<'a>>;
+
+#[derive(Debug, Default)]
+pub struct Patterns<'a>(pub Vec<Pattern<'a>>);
+
+impl<'a> Patterns<'a> {
+    pub fn matches(&self, vals: &Vec<Value<'a>>) -> bool {
+        debug_assert_eq!(self.0.len(), vals.len());
+        self.0
+            .iter()
+            .zip(vals.iter())
+            .all(|(pat, val)| pat.matches(val))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -67,18 +100,20 @@ pub enum MatchError {
 }
 
 impl<'a> Parameters<'a> {
-    pub fn match_arguments(
+    /// Bind positional and keyword arguments to parameter slots in declaration
+    /// order. Reports arity overflow and unknown/duplicate/repeated keywords.
+    /// Unfilled slots are left `None` for the caller to resolve.
+    fn bind<V: Clone>(
         &self,
-        args: &Arguments<'a>,
-    ) -> Result<HashMap<Ident<'a>, Value<'a>>, Errors<MatchError>> {
-        let mut errors = Errors::empty();
-        let mut out: HashMap<Ident<'a>, Value<'a>> =
-            HashMap::with_capacity(self.0.len());
+        args: &ArgumentSchema<'a, V>,
+        errors: &mut Errors<MatchError>,
+    ) -> Vec<Option<V>> {
+        let mut slots: Vec<Option<V>> = vec![None; self.0.len()];
 
         // 1. Positional: bind what fits; the first `n` params are the bound ones.
         let n = self.0.len().min(args.positional.len());
-        for ((name, _), arg) in self.0.iter().zip(&args.positional[..n]) {
-            out.insert(name.clone(), arg.inner.clone());
+        for (slot, arg) in slots[..n].iter_mut().zip(&args.positional[..n]) {
+            *slot = Some(arg.inner.clone());
         }
         if args.positional.len() > self.0.len() {
             let span = args.positional[self.0.len()].span;
@@ -87,7 +122,7 @@ impl<'a> Parameters<'a> {
                 got: args.positional.len(),
             })
             .with_opt_span(span)
-            .add_errors(&mut errors);
+            .add_errors(errors);
         }
 
         // 2. Keyword, in source order: repeated / unknown / clashes-with-positional.
@@ -99,25 +134,38 @@ impl<'a> Parameters<'a> {
                 let _: Option<()> =
                     Err(MatchError::RepeatedKeyword(name.to_string()))
                         .with_opt_span(span)
-                        .add_errors(&mut errors);
-            } else if !self.0.iter().any(|(p, _)| p == name) {
+                        .add_errors(errors);
+            } else if let Some(idx) = self.0.iter().position(|(p, _)| p == name)
+            {
+                if idx < n {
+                    let _: Option<()> =
+                        Err(MatchError::DuplicateArgument(name.to_string()))
+                            .with_opt_span(span)
+                            .add_errors(errors);
+                } else {
+                    slots[idx] = Some(value.clone());
+                }
+            } else {
                 let _: Option<()> =
                     Err(MatchError::UnknownKeyword(name.to_string()))
                         .with_opt_span(span)
-                        .add_errors(&mut errors);
-            } else if self.0[..n].iter().any(|(p, _)| p == name) {
-                let _: Option<()> =
-                    Err(MatchError::DuplicateArgument(name.to_string()))
-                        .with_opt_span(span)
-                        .add_errors(&mut errors);
-            } else {
-                out.insert(name.clone(), value.clone());
+                        .add_errors(errors);
             }
         }
 
-        // 3. Required coverage, in declaration order, fill in defaults
-        for (name, param) in &*self.0 {
-            if !out.contains_key(name) {
+        slots
+    }
+
+    pub fn match_arguments(
+        &self,
+        args: &Arguments<'a>,
+    ) -> Result<Vec<Value<'a>>, Errors<MatchError>> {
+        let mut errors = Errors::empty();
+        let mut slots = self.bind(args, &mut errors);
+
+        // Required coverage, in declaration order; fill in defaults.
+        for (idx, (name, param)) in self.0.iter().enumerate() {
+            if slots[idx].is_none() {
                 match &param.default {
                     None => {
                         let _: Option<()> =
@@ -125,17 +173,36 @@ impl<'a> Parameters<'a> {
                                 .without_span()
                                 .add_errors(&mut errors);
                     }
-                    Some(default) => {
-                        out.insert(name.clone(), default.clone());
-                    }
+                    Some(default) => slots[idx] = Some(default.clone()),
                 }
             }
         }
 
         if errors.0.is_empty() {
-            Ok(out)
+            Ok(slots.into_iter().map(Option::unwrap).collect())
         } else {
             Err(errors)
         }
+    }
+
+    pub fn match_pattern_arguments(
+        &self,
+        args: &PatternArguments<'a>,
+    ) -> Result<Patterns<'a>, Errors<MatchError>> {
+        let mut errors = Errors::empty();
+        let slots = self.bind(args, &mut errors);
+
+        if !errors.0.is_empty() {
+            return Err(errors);
+        }
+
+        // An unmentioned parameter is unconstrained, hence Wildcard. Defaults
+        // and required-ness are call-site notions, irrelevant to a match clause.
+        Ok(Patterns(
+            slots
+                .into_iter()
+                .map(|slot| slot.unwrap_or(Pattern::Wildcard))
+                .collect(),
+        ))
     }
 }

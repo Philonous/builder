@@ -112,7 +112,7 @@ impl<'a, 'b> ScopeGuard<'a, 'b> {
         slots
     }
 
-    fn borrowed(&mut self) -> &mut Scopes<'a, 'b> {
+    fn nested_scope(&mut self) -> &mut Scopes<'a, 'b> {
         &mut self.0
     }
 }
@@ -191,6 +191,91 @@ impl<'a> parser::LitArguments<'a> {
     }
 }
 
+impl<'a> parser::Patterns<'a> {
+    pub fn resolve<'b>(
+        self,
+    ) -> Result<parameters::PatternArguments<'a>, Errors<Error>> {
+        let mut errors = error::Errors::empty();
+        let mut positional = Vec::new();
+        let mut key_value = Vec::new();
+
+        for arg in self.0 {
+            let span = arg.span;
+            match arg.inner {
+                // Special case:
+                // Treat a bare variable as a pun - foo => foo = foo
+                parser::Pattern::Bare(parser::PatternKind::Bind(var)) => {
+                    key_value.push(Spanned::spanned(
+                        (var, parameters::Pattern::Bind(var)),
+                        span,
+                    ));
+                }
+                // Bare patterns
+                parser::Pattern::Bare(pattern) => {
+                    // Check that bare patterns don't occur after named
+                    if key_value.len() > 0 {
+                        let _: Option<()> =
+                            Err(Error::ParamBareAfterKv(pattern.to_string()))
+                                .with_span(arg.span)
+                                .add_errors(&mut errors);
+                    }
+
+                    let res = match pattern {
+                        parser::PatternKind::Lit(lit) => {
+                            let val = lit
+                                .resolve()
+                                .with_span(span)
+                                .add_errors(&mut errors)
+                                .unwrap_or(eval::Value::Unit);
+                            parameters::Pattern::Literal(val)
+                        }
+
+                        // Bare variable is already handled as punning
+                        // case, not here, so we can do the no-bare
+                        // check once before all patterns
+                        parser::PatternKind::Bind(ident) => unreachable!(
+                            "bare variable pattern already handled"
+                        ),
+                    };
+
+                    positional.push(Spanned::spanned(res, arg.span));
+                }
+
+                // Named patterns (path = "backend/app")
+                parser::Pattern::Named {
+                    name: name,
+                    pattern,
+                } => {
+                    let res = match pattern {
+                        parser::PatternKind::Lit(lit) => {
+                            let val = lit
+                                .resolve()
+                                .with_span(span)
+                                .add_errors(&mut errors)
+                                .unwrap_or(eval::Value::Unit);
+                            parameters::Pattern::Literal(val)
+                        }
+                        parser::PatternKind::Bind(var) => {
+                            parameters::Pattern::Bind(var)
+                        }
+                    };
+                    key_value.push(Spanned::spanned((name, res), span));
+                }
+            }
+        }
+
+        let patterns = parameters::ArgumentSchema {
+            positional,
+            key_value,
+        };
+        if errors.0.len() > 0 {
+            Err(errors)
+        } else {
+            Ok(patterns)
+        }
+    }
+}
+
 impl<'a> parser::Block<'a> {
     pub fn resolve<'scopes>(
         self,
@@ -231,37 +316,74 @@ impl<'a> parser::Block<'a> {
 
 // All decls are targets for now
 impl<'a> parser::Decl<'a> {
+    pub fn resolve_target<'scopes>(
+        kind: &'a target::TargetType<'a>,
+        outer: &mut Scopes<'a, 'scopes>,
+        parameters: parameters::Patterns<'a>,
+        block: parser::Block<'a>,
+    ) -> Result<target::Target<'a>, Errors<Error>> {
+        let mut this = outer.enter();
+        let mut errors: Errors<Error> = Errors::empty();
+
+        // Add Arguments to the current scope
+        // Maybe we should add a namespace prefix, like "target:"
+        for (name, _value) in kind.parameters.0.deref().iter() {
+            this.new_variable(&name);
+        }
+
+        // Resolve the command block
+        let block = block
+            .resolve(this.nested_scope())
+            .add_errors(&mut errors)
+            .unwrap_or_default();
+
+        let slots = this.detach();
+
+        let name = match &parameters.0[kind.name_is] {
+            parameters::Pattern::Literal(value) => Some(value.to_string()),
+            _ => None,
+        };
+
+        let target = target::Target {
+            kind, //
+            parameters,
+            name, // TODO
+            commands: block,
+            slots,
+        };
+
+        if errors.0.len() > 0 {
+            Err(errors)
+        } else {
+            Ok(target)
+        }
+    }
+
     pub fn resolve<'scopes>(
         self,
         outer: &mut Scopes<'a, 'scopes>,
         target_types: &'a [target::TargetType<'a>],
     ) -> Result<target::Target<'a>, Errors<Error>> {
-        // TODO: Find target type in global dictionary
-
         let mut errors: Errors<Error> = Errors::empty();
 
-        let mut guard = outer.enter();
-        let block = self
-            .definition
-            .resolve(guard.borrowed())
-            .add_errors(&mut errors)
-            .unwrap_or_default();
-
-        let target = match self.header {
+        let target: target::Target = match self.header {
             // @file style target declaration
             parser::DeclHeader::AtDecl(s) => {
                 let kind = &target::TARGET_TYPE_FILE;
-                let args = HashMap::from([(
-                    Ident("path"),
-                    eval::Value::String(Cow::Borrowed(s)),
-                )]);
-                let name = args.get(&kind.name_is).unwrap().to_string();
-                target::Target {
+                let patterns = vec![
+                    (parameters::Pattern::Literal(eval::Value::String(
+                        Cow::Borrowed(s),
+                    ))),
+                ];
+
+                parser::Decl::resolve_target(
                     kind,
-                    args,
-                    name,
-                    commands: block,
-                }
+                    outer,
+                    parameters::Patterns(patterns),
+                    self.definition,
+                )
+                .add_errors(&mut errors)
+                .unwrap_or_default()
             }
             // Explicit declaration
             parser::DeclHeader::Explicit {
@@ -269,7 +391,7 @@ impl<'a> parser::Decl<'a> {
                 // TODO: handle decl args
                 decl_args,
                 name,
-                args,
+                pattern,
             } => match decl.inner {
                 Ident("target") => {
                     // Look up target type from list
@@ -280,39 +402,35 @@ impl<'a> parser::Decl<'a> {
                         .with_span(name.span)
                         .add_errors(&mut errors);
 
-                    // Resolve arguments
-                    let args_resolved = args.resolve().add_errors(&mut errors);
-                    match target_type.zip(args_resolved) {
-                        // Previous error, skip checking arguments
+                    // Resolve pattern
+                    let pattern = pattern.resolve().add_errors(&mut errors);
+
+                    match target_type.zip(pattern) {
+                        // Previous error, skip checking pattern
                         None => {
                             // Errors must already have been set, so
                             // we simply return a dummy variable
                             Default::default()
                         }
 
-                        // Match arguments to parameters
-                        Some((target_type, args_resolved)) => {
-                            let args = target_type
+                        // Match patterns to parameters
+                        Some((target_type, pattern)) => {
+                            let pattern = target_type
                                 .parameters
-                                .match_arguments(&args_resolved)
+                                .match_pattern_arguments(&pattern)
                                 .add_errors(&mut errors);
-                            match args {
+                            match pattern {
                                 None => Default::default(),
-                                Some(args) => {
-                                    let name = args
-                                        .get(&target_type.name_is)
-                                        // TODO: This needs to be
-                                        // handled differently when we
-                                        // allow custom target types
-                                        .expect("Target name not found")
-                                        .to_string();
-                                    target::Target {
-                                        kind: &target_type,
-                                        args,
-                                        commands: block,
-                                        name,
-                                    }
-                                }
+                                // We have collected all the data, now
+                                // we can resolve the targets block
+                                Some(args) => parser::Decl::resolve_target(
+                                    target_type,
+                                    outer,
+                                    args,
+                                    self.definition,
+                                )
+                                .add_errors(&mut errors)
+                                .unwrap_or_default(),
                             }
                         }
                     }
