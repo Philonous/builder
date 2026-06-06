@@ -1,4 +1,4 @@
-@dist/exe {
+target @dist/exe {
 
   # Declare variable for reuse
   #let exe = "target/\"build\"/exe";
@@ -11,7 +11,10 @@
   # Actually build the code
   # command for runs the command
   `ls`;
-  `df -h`
+  `df -h`;
+
+  print("Hello world");
+  print()
 
 }
 
@@ -19,6 +22,8 @@ target() task("app") {
   # need("dist/exe");
 
   # Tag is inherited from resource, ${} is variable use/interpolation
-  `docker build -t "${target}"`
+  `docker build -t "${target}"`;
+
+  print("test")
 
 }

@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 pub use super::base::{Ident, Value};
 use super::command;
+use super::parameters;
 use crate::error;
 use crate::error::WithSpan;
 
@@ -15,7 +16,7 @@ pub enum Error {
     DoubleDeclare(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Var {
     // How many nested contexts up (0 is current)
     pub nesting: usize,
@@ -23,23 +24,69 @@ pub struct Var {
     pub slot: usize,
 }
 
-// The actual expression value
+pub enum FunBody {
+    Builtin(for<'b> fn(&[Value<'b>]) -> Result<Value<'b>, Error>),
+    // TODO: custom functions
+}
+
+impl<'a> std::fmt::Debug for FunBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Builtin(_) => write!(f, "<builtin>"),
+        }
+    }
+}
+
+impl FunBody {
+    pub fn exec<'outer, 'b>(
+        &self,
+        args: &[Value<'b>],
+        _ctx: &mut EvalContext<'outer, 'b>,
+    ) -> Result<Value<'b>, Error> {
+        match self {
+            Self::Builtin(f) => f(args),
+        }
+    }
+}
+
 #[derive(Debug)]
+pub struct Fun<'a> {
+    pub name: Ident<'a>,
+    pub parameters: parameters::Parameters<'a>,
+    pub body: FunBody,
+}
+
+// The actual expression value
+#[derive(Debug, Default, Clone)]
 pub enum ExprKind<'a> {
     Lit(Value<'a>),
     Var(Var),
-    // FunApp(Ident<'a>),
+    FunApp {
+        fun: &'a Fun<'a>,
+        args: Vec<Expr<'a>>,
+    },
     Command {
         executable: Cow<'a, str>,
         args: Vec<Cow<'a, str>>,
     },
+    #[default]
+    Unit,
 }
 
 // Expression with metadata
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Expr<'a> {
     pub kind: ExprKind<'a>,
-    pub span: error::Span,
+    pub span: Option<error::Span>,
+}
+
+impl<'a> From<Value<'a>> for Expr<'a> {
+    fn from(value: Value<'a>) -> Self {
+        Self {
+            kind: ExprKind::Lit(value),
+            span: None,
+        }
+    }
 }
 
 impl<'a> Expr<'a> {
@@ -49,7 +96,7 @@ impl<'a> Expr<'a> {
     ) -> Result<Value<'a>, error::Spanned<Error>> {
         Ok(match &self.kind {
             ExprKind::Lit(val) => val.clone(),
-            ExprKind::Var(var) => ctx.read_var(var).with_span(self.span)?,
+            ExprKind::Var(var) => ctx.read_var(var).with_opt_span(self.span)?,
             // Expr::FunApp(ident) => todo!(),
             ExprKind::Command { executable, args } => {
                 let cmd = command::Command {
@@ -59,6 +106,14 @@ impl<'a> Expr<'a> {
                 cmd.exe().with_span_from(self.span)?;
                 Value::Unit
             }
+            ExprKind::FunApp { fun, args } => {
+                let mut args_acc = Vec::with_capacity(args.len());
+                for expr in args.iter() {
+                    args_acc.push(expr.eval(ctx)?);
+                }
+                fun.body.exec(&args_acc, ctx).with_opt_span(self.span)?
+            }
+            ExprKind::Unit => Value::Unit,
         })
     }
 }
@@ -110,7 +165,6 @@ impl<'a> Block<'a> {
         ctx: &mut EvalContext<'outer, 'a>,
     ) -> Result<Value<'a>, error::Spanned<Error>> {
         // Create new stack frame
-        let this_slots = self.empty_slots.clone();
         let mut this = EvalContext {
             variables: ctx.variables,
         };
@@ -174,6 +228,24 @@ impl<'outer, 'a> EvalContext<'outer, 'a> {
     }
 }
 
-// impl <'a> Block<'a> {
-//     eval
-// }
+const BUILT_FUN_PRINT: Fun<'static> = Fun {
+    name: Ident("print"),
+    parameters: parameters::Parameters(parameters::CowSlice::Borrowed(&[(
+        Ident("str"),
+        parameters::Parameter {
+            default: None,
+            span: None,
+        },
+    )])),
+    body: FunBody::Builtin(|args| match args {
+        [str] => {
+            println!("{}", str);
+            Ok(Value::Unit)
+        }
+        // Analyser has checked that number of arguments is correct,
+        // so this is unreachable
+        _ => unreachable!("builtin print: invalid number of arguments"),
+    }),
+};
+
+pub const BUILTIN_FUNCTIONS: &'static [Fun<'static>] = &[BUILT_FUN_PRINT];

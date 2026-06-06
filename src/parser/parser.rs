@@ -1,5 +1,4 @@
 use super::string::QuoteError;
-use ariadne::{Color, Label, Report, ReportKind};
 use chumsky::input::Stream;
 use chumsky::{input::ValueInput, prelude::*};
 use std::borrow::Cow;
@@ -58,7 +57,7 @@ impl<'a> Command<MaybeQuoted<'a>> {
 #[derive(Clone, PartialEq, Debug)]
 pub enum Argument<'a> {
     Bare(Expr<'a>),
-    Named { name: Ident<'a>, value: Expr<'a> },
+    Named { name: Ident<'a>, expr: Expr<'a> },
 }
 
 impl<'tok> Argument<'tok> {
@@ -73,7 +72,7 @@ impl<'tok> Argument<'tok> {
         Ident::parse()
             .then_ignore(just(normal!(Equals)))
             .then(expr.clone())
-            .map(|(name, value)| Argument::Named { name, value })
+            .map(|(name, expr)| Argument::Named { name, expr })
             .or(expr.map(Argument::Bare))
     }
 }
@@ -136,7 +135,7 @@ impl<'tok> LitArgument<'tok> {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct LitArguments<'a>(pub Vec<Spanned<LitArgument<'a>>>);
 
 impl<'tok> LitArguments<'tok> {
@@ -227,18 +226,6 @@ impl<'tok> Patterns<'tok> {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum DeclHeader<'a> {
-    /// Type and definition, e.g. "target" and "file("dist/exe")
-    Explicit {
-        decl: Spanned<Ident<'a>>,
-        decl_args: LitArguments<'a>,
-        name: Spanned<Ident<'a>>, // E.g. target file("dist/exe")
-        pattern: Patterns<'a>,
-    },
-    AtDecl(&'a str), // E.g. @dist/exe
-}
-
-#[derive(Clone, PartialEq, Debug)]
 pub struct Block<'a>(pub Vec<Statement<'a>>);
 
 impl<'tok> Block<'tok> {
@@ -253,14 +240,6 @@ impl<'tok> Block<'tok> {
             .delimited_by(just(normal!(BraceOpen)), just(normal!(BraceClose)))
             .map(Block)
     }
-}
-
-// TODO: This assumes all decls have target-shape, need to allow
-// functions and constants at least
-#[derive(Clone, PartialEq, Debug)]
-pub struct Decl<'a> {
-    pub header: DeclHeader<'a>,
-    pub definition: Block<'a>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -349,26 +328,38 @@ impl<'tok> Statement<'tok> {
     }
 }
 
-impl<'tok> DeclHeader<'tok> {
+#[derive(Clone, PartialEq, Debug)]
+pub enum TargetIdent<'a> {
+    Normal {
+        name: Spanned<Ident<'a>>, // E.g. target file("dist/exe")
+        pattern: Patterns<'a>,
+    },
+    AtTarget(&'a str), // E.g. @dist/exe
+}
+
+impl<'tok> TargetIdent<'tok> {
     fn parse<'src: 'tok, I>(
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        let explicit = Ident::parse()
+        let at_decl = select! { normal!(AtString(s)) => Self::AtTarget(s) };
+        let normal_target_decl = Ident::parse()
             .spanned()
-            .then(LitArguments::parse())
-            .then(Ident::parse().spanned())
             .then(Patterns::parse())
-            .map(|(((decl, decl_args), name), pattern)| Self::Explicit {
-                decl,
-                decl_args,
-                name,
-                pattern,
-            });
-        let at_decl = select! { normal!(AtString(s)) => DeclHeader::AtDecl(s) };
-        at_decl.or(explicit)
+            .map(|(name, pattern)| Self::Normal { name, pattern });
+        at_decl.or(normal_target_decl)
     }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum Decl<'a> {
+    Target {
+        args: LitArguments<'a>,
+        ident: TargetIdent<'a>,
+
+        block: Block<'a>,
+    },
 }
 
 impl<'tok> Decl<'tok> {
@@ -377,10 +368,18 @@ impl<'tok> Decl<'tok> {
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        let decls = Block::parse();
-        DeclHeader::parse()
-            .then(decls)
-            .map(|(header, definition)| Decl { header, definition })
+        let target_header = select! {normal!(Ident("target")) => ()}
+            .ignore_then(
+                LitArguments::parse()
+                    .or_not()
+                    .map(|args| args.unwrap_or_default()),
+            );
+        let target = target_header
+            .then(TargetIdent::parse())
+            .then(Block::parse())
+            .map(|((args, ident), block)| Self::Target { args, ident, block });
+
+        target
     }
 }
 

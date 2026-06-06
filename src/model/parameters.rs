@@ -1,9 +1,6 @@
 //! Handling of parameters and arguments
 use crate::error::{AddErrors, Errors, Span, Spanned, WithSpan};
-use std::{
-    collections::{HashMap, HashSet},
-    ops::Deref,
-};
+use std::{collections::HashSet, ops::Deref};
 use thiserror;
 
 use super::base::{Ident, Value};
@@ -44,12 +41,10 @@ impl<'a, T> Deref for CowSlice<'a, T> {
 pub struct Parameters<'a>(pub CowSlice<'a, (Ident<'a>, Parameter<'a>)>);
 
 #[derive(Debug, Default)]
-pub struct ArgumentSchema<'a, V> {
+pub struct Arguments<'a, V> {
     pub positional: Vec<Spanned<V>>,
     pub key_value: Vec<Spanned<(Ident<'a>, V)>>,
 }
-
-pub type Arguments<'a> = ArgumentSchema<'a, Value<'a>>;
 
 #[derive(Debug, Clone)]
 pub enum Pattern<'a> {
@@ -68,7 +63,7 @@ impl<'a> Pattern<'a> {
     }
 }
 
-pub type PatternArguments<'a> = ArgumentSchema<'a, Pattern<'a>>;
+pub type PatternArguments<'a> = Arguments<'a, Pattern<'a>>;
 
 #[derive(Debug, Default)]
 pub struct Patterns<'a>(pub Vec<Pattern<'a>>);
@@ -105,7 +100,7 @@ impl<'a> Parameters<'a> {
     /// Unfilled slots are left `None` for the caller to resolve.
     fn bind<V: Clone>(
         &self,
-        args: &ArgumentSchema<'a, V>,
+        args: &Arguments<'a, V>,
         errors: &mut Errors<MatchError>,
     ) -> Vec<Option<V>> {
         let mut slots: Vec<Option<V>> = vec![None; self.0.len()];
@@ -156,10 +151,10 @@ impl<'a> Parameters<'a> {
         slots
     }
 
-    pub fn match_arguments(
+    pub fn match_arguments<V: Clone + From<Value<'a>>>(
         &self,
-        args: &Arguments<'a>,
-    ) -> Result<Vec<Value<'a>>, Errors<MatchError>> {
+        args: &Arguments<'a, V>,
+    ) -> Result<Vec<V>, Errors<MatchError>> {
         let mut errors = Errors::empty();
         let mut slots = self.bind(args, &mut errors);
 
@@ -173,16 +168,12 @@ impl<'a> Parameters<'a> {
                                 .without_span()
                                 .add_errors(&mut errors);
                     }
-                    Some(default) => slots[idx] = Some(default.clone()),
+                    Some(default) => slots[idx] = Some(default.clone().into()),
                 }
             }
         }
 
-        if errors.0.is_empty() {
-            Ok(slots.into_iter().map(Option::unwrap).collect())
-        } else {
-            Err(errors)
-        }
+        errors.ok(slots.into_iter().map(Option::unwrap).collect())
     }
 
     pub fn match_pattern_arguments(

@@ -1,3 +1,5 @@
+use super::model::decl;
+use super::model::decl::Decls;
 use super::model::eval;
 use super::model::parameters;
 use super::model::target;
@@ -13,8 +15,7 @@ use crate::{
 };
 
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -30,8 +31,10 @@ pub enum Error {
     UnknownTargetType(String),
     #[error("{0}")]
     ParamMatchError(#[from] parameters::MatchError),
-    #[error("positional parameter {0} after key-value")]
-    ParamBareAfterKv(String),
+    #[error("positional parameter after key-value")]
+    ParamBareAfterKv,
+    #[error("function {0} is not known")]
+    FunNotFound(String),
 }
 
 impl<'a> Slots<'a> {
@@ -94,7 +97,7 @@ impl<'a, 'b> ScopeGuard<'a, 'b> {
         self.0
              .0
             .iter()
-            .rev()
+            .rev() // Last element is innermost scope
             .enumerate()
             .find_map(|(nesting, scope)| {
                 scope
@@ -112,6 +115,7 @@ impl<'a, 'b> ScopeGuard<'a, 'b> {
         slots
     }
 
+    /// Add a new nested scope
     fn nested_scope(&mut self) -> &mut Scopes<'a, 'b> {
         &mut self.0
     }
@@ -132,59 +136,111 @@ impl<'a> parser::Lit<'a> {
     }
 }
 
+pub struct Ctx<'a> {
+    pub functions: &'a [eval::Fun<'a>], // constants
+}
+
 impl<'a> parser::Expr<'a> {
-    pub fn resolve<'b>(
+    fn resolve<'b>(
         self,
+        ctx: &Ctx<'a>,
         scopes: &mut ScopeGuard<'a, 'b>,
-    ) -> Result<eval::Expr<'a>, Spanned<Error>> {
+    ) -> Result<eval::Expr<'a>, Errors<Error>> {
+        let mut errors = Errors::empty();
         let span = self.0.span.into();
         let kind = match self.0.inner {
-            parser::ExprKind::Lit(lit) => {
-                eval::ExprKind::Lit(lit.resolve().with_span_from(span)?)
-            }
+            parser::ExprKind::Lit(lit) => eval::ExprKind::Lit(
+                lit.resolve()
+                    .with_span(span)
+                    .add_errors(&mut errors)
+                    .unwrap_or_default(),
+            ),
 
             parser::ExprKind::Ident(name) => scopes
                 .find_variable(&name)
                 .map(eval::ExprKind::Var)
-                .with_span(span)?,
+                .with_span(span)
+                .add_errors(&mut errors)
+                .unwrap_or_default(),
             parser::ExprKind::Command(cmd) => cmd
                 .resolve_strings()
                 .map(|parser::Command { executable, args }| {
                     eval::ExprKind::Command { executable, args }
                 })
-                .with_span_from(span)?,
-            parser::ExprKind::FunApp(ident, exprs) => unimplemented!(),
+                .with_span(span)
+                .add_errors(&mut errors)
+                .unwrap_or_default(),
+            parser::ExprKind::FunApp(ident, args) => {
+                (|| {
+                    let fun =
+                        match ctx.functions.iter().find(|f| f.name == ident) {
+                            None => Err(Spanned::spanned(
+                                Error::FunNotFound(ident.to_string()),
+                                span,
+                            ))
+                            .add_errors(&mut errors),
+                            Some(f) => Some(f),
+                        }?;
+                    let args_separate =
+                        args.resolve(ctx, scopes).add_errors(&mut errors)?;
+
+                    let args = fun
+                        .parameters
+                        .match_arguments(&args_separate)
+                        .add_errors(&mut errors)?;
+                    Some(eval::ExprKind::FunApp { fun, args })
+
+                    // args.
+                })()
+                .unwrap_or_default()
+            }
         };
-        Ok(eval::Expr { kind, span })
+        errors.ok(eval::Expr {
+            kind,
+            span: Some(span),
+        })
     }
 }
 
-impl<'a> parser::LitArguments<'a> {
-    pub fn resolve<'b>(
+impl<'a> parser::Arguments<'a> {
+    fn resolve<'b>(
         self,
-    ) -> Result<parameters::Arguments<'a>, Spanned<Error>> {
+        ctx: &Ctx<'a>,
+        scopes: &mut ScopeGuard<'a, 'b>,
+    ) -> Result<parameters::Arguments<'a, eval::Expr<'a>>, Errors<Error>> {
+        let mut errors = error::Errors::empty();
         let mut positional = Vec::new();
         let mut key_value = Vec::new();
         // Resolve literals in argument position and check that
         // positional arguments don't occur after key-value arguments
         for arg in self.0 {
-            let span = arg.span;
             match arg.inner {
-                parser::LitArgument::Bare(lit) => {
-                    let val = lit.resolve().with_span(span)?;
+                parser::Argument::Bare(expr) => {
+                    let expr =
+                        expr.resolve(ctx, scopes).add_errors(&mut errors);
                     if key_value.len() > 0 {
-                        return Err(Error::ParamBareAfterKv(val.to_string()))
-                            .with_span(arg.span);
+                        let _: Option<()> = Err(Spanned::spanned(
+                            Error::ParamBareAfterKv,
+                            arg.span,
+                        ))
+                        .add_errors(&mut errors);
+                    } else {
+                        expr.map(|expr| {
+                            positional.push(Spanned::spanned(expr, arg.span))
+                        });
                     }
-                    positional.push(Spanned::spanned(val, arg.span));
                 }
-                parser::LitArgument::Named { name, value } => {
-                    let val = value.resolve().with_span(span)?;
-                    key_value.push(Spanned::spanned((name, val), arg.span));
+                parser::Argument::Named { name, expr } => {
+                    let expr =
+                        expr.resolve(ctx, scopes).add_errors(&mut errors);
+                    expr.map(|expr| {
+                        key_value.push(Spanned::spanned((name, expr), arg.span))
+                    });
                 }
             }
         }
-        Ok(parameters::Arguments {
+
+        errors.ok(parameters::Arguments {
             positional,
             key_value,
         })
@@ -203,7 +259,8 @@ impl<'a> parser::Patterns<'a> {
             let span = arg.span;
             match arg.inner {
                 // Special case:
-                // Treat a bare variable as a pun - foo => foo = foo
+                // Treat a bare variable pattern as a pun,
+                // e.g. `foo` => `foo = foo`
                 parser::Pattern::Bare(parser::PatternKind::Bind(var)) => {
                     key_value.push(Spanned::spanned(
                         (var, parameters::Pattern::Bind(var)),
@@ -214,10 +271,9 @@ impl<'a> parser::Patterns<'a> {
                 parser::Pattern::Bare(pattern) => {
                     // Check that bare patterns don't occur after named
                     if key_value.len() > 0 {
-                        let _: Option<()> =
-                            Err(Error::ParamBareAfterKv(pattern.to_string()))
-                                .with_span(arg.span)
-                                .add_errors(&mut errors);
+                        let _: Option<()> = Err(Error::ParamBareAfterKv)
+                            .with_span(arg.span)
+                            .add_errors(&mut errors);
                     }
 
                     let res = match pattern {
@@ -230,10 +286,9 @@ impl<'a> parser::Patterns<'a> {
                             parameters::Pattern::Literal(val)
                         }
 
-                        // Bare variable is already handled as punning
-                        // case, not here, so we can do the no-bare
-                        // check once before all patterns
-                        parser::PatternKind::Bind(ident) => unreachable!(
+                        // Bare variable pattern is already handled as
+                        // special case
+                        parser::PatternKind::Bind(_) => unreachable!(
                             "bare variable pattern already handled"
                         ),
                     };
@@ -241,11 +296,8 @@ impl<'a> parser::Patterns<'a> {
                     positional.push(Spanned::spanned(res, arg.span));
                 }
 
-                // Named patterns (path = "backend/app")
-                parser::Pattern::Named {
-                    name: name,
-                    pattern,
-                } => {
+                // Named patterns (e.g. path = "backend/app")
+                parser::Pattern::Named { name, pattern } => {
                     let res = match pattern {
                         parser::PatternKind::Lit(lit) => {
                             let val = lit
@@ -264,85 +316,100 @@ impl<'a> parser::Patterns<'a> {
             }
         }
 
-        let patterns = parameters::ArgumentSchema {
+        let patterns = parameters::Arguments {
             positional,
             key_value,
         };
-        if errors.0.len() > 0 {
-            Err(errors)
-        } else {
-            Ok(patterns)
-        }
+
+        errors.ok(patterns)
     }
 }
 
 impl<'a> parser::Block<'a> {
-    pub fn resolve<'scopes>(
+    fn resolve<'scopes>(
         self,
+        ctx: &Ctx<'a>,
         outer: &mut Scopes<'a, 'scopes>,
-    ) -> Result<eval::Block<'a>, Spanned<Error>> {
+    ) -> Result<eval::Block<'a>, Errors<Error>> {
+        let mut errors = Errors::empty();
         let mut this = outer.enter();
         let mut resolved: Vec<eval::Statement<'a>> =
             Vec::with_capacity(self.0.len());
         for statement in self.0 {
             let stmt = match statement {
                 parser::Statement::Let(ident, expr) => {
+                    // let var = expr
                     // Resolve expression first so it sees outer scope
-                    let expr = expr.resolve(&mut this)?;
+                    // Ordering matters here, we don't want the
+                    // expression to see the variable it initialises
+                    let expr =
+                        expr.resolve(ctx, &mut this).add_errors(&mut errors);
                     // Now create variable in inner scope
                     let var = this
                         .new_variable(&ident.inner)
-                        .with_span(ident.span)?;
-
-                    eval::Statement::Let {
+                        .with_span(ident.span)
+                        .add_errors(&mut errors);
+                    // Create resolved statement if both var and expr are `Some`
+                    var.zip(expr).map(|(var, expr)| eval::Statement::Let {
                         var,
                         span: ident.span.into(),
                         expr,
-                    }
+                    })
                 }
-                parser::Statement::Expr(expr) => {
-                    eval::Statement::Expr(expr.resolve(&mut this)?)
-                }
+                parser::Statement::Expr(expr) => expr
+                    .resolve(ctx, &mut this)
+                    .add_errors(&mut errors)
+                    .map(eval::Statement::Expr),
             };
-            resolved.push(stmt);
+            // Add statement if it resolved, if any return an error,
+            // we don't return the list at all, so we never return a
+            // partia list
+            stmt.map(|stmt| resolved.push(stmt));
         }
 
-        Ok(eval::Block {
+        errors.ok(eval::Block {
             statements: resolved,
             empty_slots: this.detach(),
         })
     }
 }
 
-// All decls are targets for now
 impl<'a> parser::Decl<'a> {
-    pub fn resolve_target<'scopes>(
+    fn resolve_target<'scopes>(
+        ctx: &Ctx<'a>,
         kind: &'a target::TargetType<'a>,
         outer: &mut Scopes<'a, 'scopes>,
         parameters: parameters::Patterns<'a>,
         block: parser::Block<'a>,
+        // We only have targets as decls for now
     ) -> Result<target::Target<'a>, Errors<Error>> {
+        // target Constr(patter1, pattern2, ...)
+
         let mut this = outer.enter();
         let mut errors: Errors<Error> = Errors::empty();
 
-        // Add Arguments to the current scope
-        // Maybe we should add a namespace prefix, like "target:"
-        for (name, _value) in kind.parameters.0.deref().iter() {
-            this.new_variable(&name);
-        }
-
-        // Resolve the command block
-        let block = block
-            .resolve(this.nested_scope())
-            .add_errors(&mut errors)
-            .unwrap_or_default();
-
-        let slots = this.detach();
-
+        // Resolve target patterns
         let name = match &parameters.0[kind.name_is] {
             parameters::Pattern::Literal(value) => Some(value.to_string()),
             _ => None,
         };
+
+        // Add Arguments to the current scope
+        // (As defined by the target type)
+        // Maybe we should add a namespace prefix, like "target:"
+        for (name, param) in kind.parameters.0.deref().iter() {
+            this.new_variable(&name)
+                .with_opt_span(param.span)
+                .add_errors(&mut errors);
+        }
+
+        // Resolve the command block
+        let block = block
+            .resolve(ctx, this.nested_scope())
+            .add_errors(&mut errors)
+            .unwrap_or_default();
+
+        let slots = this.detach();
 
         let target = target::Target {
             kind, //
@@ -352,49 +419,38 @@ impl<'a> parser::Decl<'a> {
             slots,
         };
 
-        if errors.0.len() > 0 {
-            Err(errors)
-        } else {
-            Ok(target)
-        }
+        errors.ok(target)
     }
 
-    pub fn resolve<'scopes>(
+    fn resolve<'scopes>(
         self,
+        ctx: &Ctx<'a>,
         outer: &mut Scopes<'a, 'scopes>,
         target_types: &'a [target::TargetType<'a>],
     ) -> Result<target::Target<'a>, Errors<Error>> {
         let mut errors: Errors<Error> = Errors::empty();
 
-        let target: target::Target = match self.header {
-            // @file style target declaration
-            parser::DeclHeader::AtDecl(s) => {
-                let kind = &target::TARGET_TYPE_FILE;
-                let patterns = vec![
-                    (parameters::Pattern::Literal(eval::Value::String(
-                        Cow::Borrowed(s),
-                    ))),
-                ];
+        let target = match self {
+            parser::Decl::Target { args, ident, block } => match ident {
+                parser::TargetIdent::AtTarget(s) => {
+                    let kind = &target::TARGET_TYPE_FILE;
+                    let patterns = vec![
+                        (parameters::Pattern::Literal(eval::Value::String(
+                            Cow::Borrowed(s),
+                        ))),
+                    ];
 
-                parser::Decl::resolve_target(
-                    kind,
-                    outer,
-                    parameters::Patterns(patterns),
-                    self.definition,
-                )
-                .add_errors(&mut errors)
-                .unwrap_or_default()
-            }
-            // Explicit declaration
-            parser::DeclHeader::Explicit {
-                decl,
-                // TODO: handle decl args
-                decl_args,
-                name,
-                pattern,
-            } => match decl.inner {
-                Ident("target") => {
-                    // Look up target type from list
+                    parser::Decl::resolve_target(
+                        ctx,
+                        kind,
+                        outer,
+                        parameters::Patterns(patterns),
+                        block,
+                    )
+                    .add_errors(&mut errors)
+                    .unwrap_or_default()
+                }
+                parser::TargetIdent::Normal { name, pattern } => {
                     let target_type = target_types
                         .iter()
                         .find(|tt| tt.name == name.inner)
@@ -424,10 +480,11 @@ impl<'a> parser::Decl<'a> {
                                 // We have collected all the data, now
                                 // we can resolve the targets block
                                 Some(args) => parser::Decl::resolve_target(
+                                    ctx,
                                     target_type,
                                     outer,
                                     args,
-                                    self.definition,
+                                    block,
                                 )
                                 .add_errors(&mut errors)
                                 .unwrap_or_default(),
@@ -435,21 +492,11 @@ impl<'a> parser::Decl<'a> {
                         }
                     }
                 }
-                // Unknown decl types
-                Ident(name) => {
-                    let _: Option<()> =
-                        Err(Error::UnknownDecl(name.to_string()))
-                            .with_span(decl.span)
-                            .add_errors(&mut errors);
-                    Default::default()
-                }
             },
         };
-        if errors.0.len() > 0 {
-            Err(errors)
-        } else {
-            Ok(target)
-        }
+
+        errors.ok(target)
+
         // Target may want to set special parameters, e.g. resolved path
 
         // Ok(target::Target { kind: self })
@@ -460,23 +507,23 @@ static TARGET_TYPES: &[target::TargetType<'static>] =
     &[target::TARGET_TYPE_FILE, target::TARGET_TYPE_TASK];
 
 impl<'a> parser::Ast<'a> {
-    pub fn resolve(self) -> Result<Vec<target::Target<'a>>, Errors<Error>> {
+    pub fn resolve(self) -> Result<Decls<'a>, Errors<Error>> {
+        let ctx = Ctx {
+            functions: eval::BUILTIN_FUNCTIONS,
+        };
+
         let mut errors = Errors::empty();
         let mut decls = Vec::with_capacity(self.decls.len());
         let mut scopes = Vec::new();
 
         for decl in self.decls {
             decls.push(
-                decl.resolve(&mut Scopes(&mut scopes), TARGET_TYPES)
+                decl.resolve(&ctx, &mut Scopes(&mut scopes), TARGET_TYPES)
                     .add_errors(&mut errors)
                     .unwrap_or_default(),
             );
         }
 
-        if errors.0.len() > 0 {
-            Err(errors)
-        } else {
-            Ok(decls)
-        }
+        errors.ok(decl::Decls(decls))
     }
 }

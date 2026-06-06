@@ -2,6 +2,7 @@
 
 pub mod base;
 pub mod command;
+pub mod decl;
 pub mod eval;
 pub mod parameters;
 pub mod target;

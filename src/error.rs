@@ -75,7 +75,7 @@ where
 pub trait WithSpan<T, E> {
     fn with_span_from<S: Into<Span>, Err: From<E>>(
         self,
-        span: S,
+        span: Option<S>,
     ) -> Result<T, Spanned<Err>>;
 
     fn with_span<S: Into<Span>>(self, span: S) -> Result<T, Spanned<E>>;
@@ -88,10 +88,10 @@ pub trait WithSpan<T, E> {
 impl<T, E> WithSpan<T, E> for Result<T, E> {
     fn with_span_from<S: Into<Span>, Err: From<E>>(
         self,
-        span: S,
+        span: Option<S>,
     ) -> Result<T, Spanned<Err>> {
         self.map_err(|error| Spanned {
-            span: Some(span.into()),
+            span: span.map(|s| s.into()),
             inner: error.into(),
         })
     }
@@ -116,8 +116,18 @@ impl<T, E> WithSpan<T, E> for Result<T, E> {
 pub struct Errors<E>(pub Vec<Spanned<E>>);
 
 impl<E> Errors<E> {
+    /// New empty error list
     pub fn empty() -> Self {
         Errors(Vec::new())
+    }
+
+    /// Return Ok(val) if the list of errors is empty, otherwise Err(errors)
+    pub fn ok<V>(self, v: V) -> Result<V, Self> {
+        if self.0.len() > 0 {
+            Err(self)
+        } else {
+            Ok(v)
+        }
     }
 }
 
@@ -166,21 +176,6 @@ impl<T, ES, E: IntoErrors<ES>> AddErrors<ES> for Result<T, E> {
         }
     }
 }
-
-// Try the expression, on error append errors, then return the errors
-macro_rules! try_errors {
-    ($errors:ident, $v:expr) => {
-        match $v {
-            Ok(ok) => (),
-            Err(e) => {
-                $errors.append(e)
-                return Err($errors)
-            }
-        }
-    };
-}
-
-pub(crate) use try_errors;
 
 pub trait ToRange {
     fn to_range(&self) -> Option<Range<usize>>;

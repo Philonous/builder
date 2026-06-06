@@ -1,7 +1,6 @@
-use std::env;
 use std::fs;
 
-use ariadne::{Color, Label, Report, ReportKind, Source};
+use ariadne::Source;
 
 // mod error;
 mod analyser;
@@ -15,22 +14,14 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(clap::Parser, Debug)]
-#[command(
-    name = "myapp",
-    args_conflicts_with_subcommands = true,  // top-level args XOR a subcommand
-    subcommand_negates_reqs = true           // a subcommand relaxes `run_args` requirement
-)]
+#[command(name = "myapp")]
 struct Cli {
     /// Optional input file; valid before or after the command.
     #[arg(short, long, global = true, value_name = "PATH")]
     file: Option<PathBuf>,
 
     #[command(subcommand)]
-    command: Option<Command>,
-
-    /// Positionals for the implicit `run` (when no command is given).
-    #[arg(required = true)]
-    run_args: Vec<String>,
+    command: Command,
 }
 
 #[derive(Subcommand, Debug)]
@@ -41,53 +32,86 @@ enum Command {
     /// Dump zero or more items.
     Dump,
 
-    /// Run one or more items (the default command).
+    /// Dump tokens.
+    DumpTokens,
+
+    /// Run one or more items
     Run {
         #[arg(required = true)]
-        items: Vec<String>,
+        item: String,
     },
     /// Run one or more items (the default command).
     Targets,
 }
 
-fn main() {
-    let Cli {
-        file,
-        command,
-        run_args,
-    } = Cli::parse();
-    let file = &file.unwrap_or(PathBuf::from("Buildfile"));
-    let command = command.unwrap_or(Command::Run { items: run_args });
-    let src = fs::read_to_string(&file).expect("Failed to read file");
+fn parse(src: &str) -> model::decl::Decls<'_> {
     let ast = match parser::parser::parse_str(&src) {
         Ok(ast) => ast,
         Err(errs) => {
             for err in errs {
-                error::report(&err).print(Source::from(&src));
+                error::report(&err)
+                    .print(Source::from(&src))
+                    .expect("ariadne: print error");
             }
             std::process::exit(1);
         }
     };
 
-    let decls = match ast.resolve() {
+    match ast.resolve() {
         Ok(decls) => decls,
         Err(error::Errors(errs)) => {
             for err in errs {
-                error::report(&err).print(Source::from(&src));
+                error::report(&err)
+                    .print(Source::from(&src))
+                    .expect("ariadne: print error");
             }
             std::process::exit(1);
         }
-    };
+    }
+}
+
+fn main() {
+    let Cli { file, command } = Cli::parse();
+    let file = &file.unwrap_or(PathBuf::from("Buildfile"));
+    let src = fs::read_to_string(&file).expect("Failed to read file");
 
     match command {
-        Command::Check => println!("Source file={:?} checked", &file),
+        Command::Check => {
+            let _ = parse(&src);
+            println!("Source file={:?} checked", &file);
+        }
         Command::Dump => {
+            let decls = parse(&src);
             println!("{:?}", decls)
         }
-        Command::Run { items } => for item in items {},
+        Command::Run { item } => {
+            let decls = parse(&src);
+            let target = match decls.find_target_by_string(&item) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1)
+                }
+            };
+            match target.run() {
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1)
+                }
+                Ok(val) => println!("{}", val),
+            }
+        }
         Command::Targets => {
-            for decl in decls {
+            let decls = parse(&src);
+            for decl in decls.0 {
                 println!("{:?}", decl.name);
+            }
+        }
+        Command::DumpTokens => {
+            let tokens: Vec<(Result<parser::lexer::Token, _>, logos::Span)> =
+                parser::lexer::Tokenizer::new(src.as_str()).collect();
+            for tok in tokens {
+                println!("{:?}", tok);
             }
         }
     }

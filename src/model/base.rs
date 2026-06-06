@@ -7,8 +7,9 @@ impl<'a> Ident<'a> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Default)]
 pub enum Value<'a> {
+    #[default]
     Unit,
     String(Cow<'a, str>),
 }

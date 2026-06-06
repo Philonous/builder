@@ -1,10 +1,7 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::LazyLock;
 
 use super::base::Value;
 use super::eval;
-use super::parameters;
 use super::parameters::{CowSlice, Parameter, Parameters, Patterns};
 use crate::common::Ident;
 use crate::error;
@@ -67,11 +64,20 @@ impl<'a> Default for Target<'a> {
 }
 
 impl<'a> Target<'a> {
-    fn run(&self) -> Result<Value<'a>, error::Spanned<eval::Error>> {
+    pub fn run(&self) -> Result<Value<'a>, error::Spanned<eval::Error>> {
         let mut vars = Vec::new();
         let mut ctx = eval::EvalContext {
             variables: &mut vars,
         };
         self.commands.run(&mut ctx)
+    }
+
+    // Try to match the target to a single string (e.g. cli)
+    pub fn matches_string(&self, s: &str) -> bool {
+        if self.parameters.0.len() == 1 {
+            return self.parameters.0[0]
+                .matches(&eval::Value::String(Cow::Borrowed(s)));
+        }
+        false
     }
 }
