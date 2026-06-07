@@ -181,18 +181,50 @@ impl<'a> parser::Expr<'a> {
                             .add_errors(&mut errors),
                             Some(f) => Some(f),
                         }?;
-                    let args_separate =
-                        args.resolve(ctx, scopes).add_errors(&mut errors)?;
+                    let args_separate = args
+                        .inner
+                        .resolve(ctx, scopes)
+                        .add_errors(&mut errors)?;
 
                     let args = fun
                         .parameters
-                        .match_arguments(&args_separate)
+                        .match_arguments(error::Spanned {
+                            inner: &args_separate,
+                            span: Some(args.span.into()),
+                        })
                         .add_errors(&mut errors)?;
                     Some(eval::ExprKind::FunApp { fun, args })
 
                     // args.
                 })()
                 .unwrap_or_default()
+            }
+            parser::ExprKind::String(string_expr) => {
+                let mut parts = Vec::with_capacity(string_expr.0.len());
+                for part in string_expr.0 {
+                    match part {
+                        parser::StringExprPart::Lit(quoted) => {
+                            let _: Option<_> = quoted
+                                .unquote()
+                                .with_span(span)
+                                .add_errors(&mut errors)
+                                .map(|s| parts.push(eval::StringPart::Lit(s)));
+                        }
+                        parser::StringExprPart::Splice(ident) => {
+                            scopes
+                                .find_variable(&ident.inner)
+                                .with_span(ident.span)
+                                .add_errors(&mut errors)
+                                .map(|s| {
+                                    parts.push(eval::StringPart::Splice {
+                                        var: s,
+                                        span: ident.span.into(),
+                                    })
+                                });
+                        }
+                    }
+                }
+                eval::ExprKind::String(parts)
             }
         };
         errors.ok(eval::Expr {
@@ -367,9 +399,11 @@ impl<'a> parser::Block<'a> {
             stmt.map(|stmt| resolved.push(stmt));
         }
 
+        let empty_slots = this.detach();
+        eprintln!("Generated slots: {:?}", empty_slots);
         errors.ok(eval::Block {
             statements: resolved,
-            empty_slots: this.detach(),
+            slots: empty_slots,
         })
     }
 }
@@ -412,9 +446,9 @@ impl<'a> parser::Decl<'a> {
         let slots = this.detach();
 
         let target = target::Target {
-            kind, //
+            kind,
             parameters,
-            name, // TODO
+            name,
             commands: block,
             slots,
         };

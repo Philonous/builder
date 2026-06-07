@@ -1,5 +1,5 @@
 //! Handling of parameters and arguments
-use crate::error::{AddErrors, Errors, Span, Spanned, WithSpan};
+use crate::error::{self, AddErrors, Errors, Span, Spanned, WithSpan};
 use std::{collections::HashSet, ops::Deref};
 use thiserror;
 
@@ -153,11 +153,10 @@ impl<'a> Parameters<'a> {
 
     pub fn match_arguments<V: Clone + From<Value<'a>>>(
         &self,
-        args: &Arguments<'a, V>,
+        args: error::Spanned<&Arguments<'a, V>>,
     ) -> Result<Vec<V>, Errors<MatchError>> {
         let mut errors = Errors::empty();
-        let mut slots = self.bind(args, &mut errors);
-
+        let mut slots = self.bind(args.inner, &mut errors);
         // Required coverage, in declaration order; fill in defaults.
         for (idx, (name, param)) in self.0.iter().enumerate() {
             if slots[idx].is_none() {
@@ -165,7 +164,7 @@ impl<'a> Parameters<'a> {
                     None => {
                         let _: Option<()> =
                             Err(MatchError::MissingRequired(name.to_string()))
-                                .without_span()
+                                .with_opt_span(args.span)
                                 .add_errors(&mut errors);
                     }
                     Some(default) => slots[idx] = Some(default.clone().into()),
@@ -173,7 +172,10 @@ impl<'a> Parameters<'a> {
             }
         }
 
-        errors.ok(slots.into_iter().map(Option::unwrap).collect())
+        errors.ok(slots
+            .into_iter()
+            .map(|s| s.unwrap_or(Value::default().into()))
+            .collect())
     }
 
     pub fn match_pattern_arguments(

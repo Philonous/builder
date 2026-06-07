@@ -46,17 +46,13 @@ impl<'a> Quoted<'a> {
     /// than `\` or `close`.
     pub fn unquote(&self) -> Result<Cow<'a, str>, QuoteError> {
         let s = &self.raw;
-        debug_assert!(s.starts_with(self.delim) && s.ends_with(self.delim));
-        debug_assert!(s.len() >= self.delim.len_utf8() + self.delim.len_utf8());
 
-        let inner = &s[self.delim.len_utf8()..s.len() - self.delim.len_utf8()];
-
-        let Some(first) = inner.find('\\') else {
-            return Ok(Cow::Borrowed(inner));
+        let Some(first) = s.find('\\') else {
+            return Ok(Cow::Borrowed(s));
         };
 
-        let (head, tail) = inner.split_at(first);
-        let mut out = String::with_capacity(inner.len());
+        let (head, tail) = s.split_at(first);
+        let mut out = String::with_capacity(s.len());
         out.push_str(head);
 
         let mut chars = tail.chars();
@@ -66,7 +62,9 @@ impl<'a> Quoted<'a> {
                     Some('\\') => out.push('\\'),
                     Some(c) if c == self.delim => out.push(self.delim),
                     Some('n') => out.push('\n'),
+                    Some('r') => out.push('\r'),
                     Some('t') => out.push('\t'),
+                    Some('$') => out.push('$'),
                     Some(other) => {
                         return Err(QuoteError::UnknownEscape(other))
                     }

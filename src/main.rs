@@ -29,11 +29,13 @@ enum Command {
     /// Validate; takes no arguments.
     Check,
 
-    /// Dump zero or more items.
-    Dump,
-
     /// Dump tokens.
     DumpTokens,
+
+    /// Dump zero or more items.
+    DumpParse,
+
+    Dump,
 
     /// Run one or more items
     Run {
@@ -44,8 +46,8 @@ enum Command {
     Targets,
 }
 
-fn parse(src: &str) -> model::decl::Decls<'_> {
-    let ast = match parser::parser::parse_str(&src) {
+fn parse(src: &str) -> parser::parser::Ast<'_> {
+    match parser::parser::parse_str(&src) {
         Ok(ast) => ast,
         Err(errs) => {
             for err in errs {
@@ -55,8 +57,13 @@ fn parse(src: &str) -> model::decl::Decls<'_> {
             }
             std::process::exit(1);
         }
-    };
+    }
+}
 
+fn resolve<'a>(
+    src: &'a str,
+    ast: parser::parser::Ast<'a>,
+) -> model::decl::Decls<'a> {
     match ast.resolve() {
         Ok(decls) => decls,
         Err(error::Errors(errs)) => {
@@ -80,12 +87,9 @@ fn main() {
             let _ = parse(&src);
             println!("Source file={:?} checked", &file);
         }
-        Command::Dump => {
-            let decls = parse(&src);
-            println!("{:?}", decls)
-        }
         Command::Run { item } => {
-            let decls = parse(&src);
+            let ast = parse(&src);
+            let decls = resolve(&src, ast);
             let target = match decls.find_target_by_string(&item) {
                 Ok(t) => t,
                 Err(e) => {
@@ -102,17 +106,30 @@ fn main() {
             }
         }
         Command::Targets => {
-            let decls = parse(&src);
+            let ast = parse(&src);
+            let decls = resolve(&src, ast);
             for decl in decls.0 {
                 println!("{:?}", decl.name);
             }
         }
+
         Command::DumpTokens => {
             let tokens: Vec<(Result<parser::lexer::Token, _>, logos::Span)> =
                 parser::lexer::Tokenizer::new(src.as_str()).collect();
             for tok in tokens {
                 println!("{:?}", tok);
             }
+        }
+
+        Command::DumpParse => {
+            let ast = parse(&src);
+            println!("{:?}", ast)
+        }
+
+        Command::Dump => {
+            let ast = parse(&src);
+            let decls = resolve(&src, ast);
+            println!("{:?}", decls)
         }
     }
 }

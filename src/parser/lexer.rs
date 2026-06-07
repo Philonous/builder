@@ -16,10 +16,10 @@ pub enum LexError {
 #[logos(error(LexError))]
 #[logos(skip r"[ \t\r\n\f]+")]
 pub enum NormalToken<'a> {
-    #[regex(r"[a-zA-Z][a-zA-Z/-]*", |lex| lex.slice())]
+    #[regex(r"[a-zA-Z][a-zA-Z/_-]*", |lex| lex.slice())]
     Ident(&'a str),
 
-    #[regex(r"@[.a-zA-Z][.a-zA-Z/-]*", |lex| &lex.slice()[1..])]
+    #[regex(r"@[.-/a-zA-Z]+", |lex| &lex.slice()[1..])]
     AtString(&'a str),
 
     #[token("(")]
@@ -43,9 +43,8 @@ pub enum NormalToken<'a> {
     // Literals
 
     // Taken from https://logos.maciej.codes/examples/json.html
-    #[regex(r#""([^"\\\x00-\x1F]|\\(["\\bnfrt/]|u[a-fA-F0-9]{4}))*""#,
-        |s| Quoted{raw: s.slice(), delim: '"'})]
-    StringLit(Quoted<'a>),
+    #[regex(r#"""#)]
+    StringStart,
 
     // Keywords
     #[token("let")]
@@ -73,10 +72,7 @@ impl fmt::Display for NormalToken<'_> {
             Self::Comma => write!(f, ","),
             Self::Equals => write!(f, "="),
             Self::Underscore => write!(f, "_"),
-            Self::StringLit(s) => {
-                let sraw = s.raw;
-                write!(f, "{sraw}")
-            }
+            Self::StringStart => write!(f, r#"""#),
             Self::CommandStart => write!(f, "`"),
             Self::Let => write!(f, "let"),
             Self::Comment => write!(f, "#"),
@@ -88,7 +84,7 @@ impl fmt::Display for NormalToken<'_> {
 #[logos(error(LexError))]
 #[logos(skip r"[ \t\r\n\f]+")]
 pub enum CommandToken<'a> {
-    #[regex(r#"[^ `\"$\t\r\n\f]+"#, |lex| lex.slice())]
+    #[regex(r#"[^ `\"$\t\r\n\f]+"#)]
     UnquotedString(&'a str),
     #[regex(r#""([^"\\\x00-\x1F]|\\(["\\bnfrt/]|u[a-fA-F0-9]{4}))*""#,
         |s| Quoted{raw: s.slice(), delim: '"'})]
@@ -110,9 +106,46 @@ impl fmt::Display for CommandToken<'_> {
     }
 }
 
+// Extract the variable of a splice, e.g. "${ my_var }" => "my_var"
+fn splice_name(s: &str) -> Option<&str> {
+    // Expect sigil followed by identifier wrapped in braces with optional spaces
+    // e.g. ${ my_variable } or #{testing-testing}
+    let re = regex::Regex::new(
+        r#".\{[[:space:]]*([a-zA-Z_][a-zA-Z/-_]*)[[:space:]]*\}"#,
+    )
+    .expect("parsing regex");
+    Some(re.captures(s)?.get(1)?.as_str())
+}
+
+#[derive(Debug, Logos, PartialEq, Clone)]
+#[logos(error(LexError))]
+#[logos(subpattern char = r#"[^${"\\\x00-\x1F]"#)]
+#[logos(subpattern escape = r#"\\["\\nrt$]"#)]
+
+pub enum StringToken<'a> {
+    // #[regex(r#"[^ `\"$\t\r\n\f]+"#, |lex| lex.slice())]
+    #[regex(r#"((?&char)|(?&escape))+"#, |lex| Quoted{delim: '"', raw: lex.slice()})]
+    LitPart(Quoted<'a>),
+    #[regex(r#"\$\{[[:space:]]*[a-zA-Z][a-zA-Z/_-]+[[:space:]]*\}"#, |lex| splice_name(lex.slice()))]
+    SpliceIdent(&'a str),
+    #[token(r#"""#)]
+    StringEnd,
+}
+
+impl fmt::Display for StringToken<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            StringToken::LitPart(s) => write!(f, "{}", s),
+            StringToken::SpliceIdent(s) => write!(f, "${{{}}}", s),
+            StringToken::StringEnd => write!(f, "\""),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token<'a> {
     Normal(NormalToken<'a>),
+    String(StringToken<'a>),
     Command(CommandToken<'a>),
     // Error token, never produced directly. We synthesize it as a
     // marker for chumsky to consume when lexing fails
@@ -123,8 +156,9 @@ impl fmt::Display for Token<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Normal(s) => write!(f, "{s}"),
+            Self::String(s) => write!(f, "{s}"),
             Self::Command(s) => write!(f, "{s}"),
-            Self::Error => write!(f, ""),
+            Self::Error => write!(f, "unexpected token"),
         }
     }
 }
@@ -144,6 +178,19 @@ macro_rules! normal {
 
 pub(crate) use normal;
 
+macro_rules! string {
+    // string!(Bare)
+    ($variant:ident) => {
+        Token::String(StringToken::$variant)
+    };
+    // string!(String(str)), string!(Pair(a, b)), etc.
+    ($variant:ident( $($inner:tt)* )) => {
+        Token::String(StringToken::$variant( $($inner)* ))
+    };
+}
+
+pub(crate) use string;
+
 macro_rules! command {
     // normal!(Semicolon)
     ($variant:ident) => {
@@ -160,12 +207,14 @@ pub(crate) use command;
 #[derive(Clone, Copy, Debug)]
 enum Mode {
     Normal,
+    String,
     Command,
 }
 
 #[derive(Debug, Default)]
 enum LexerState<'a> {
     Normal(Lexer<'a, NormalToken<'a>>),
+    String(Lexer<'a, StringToken<'a>>),
     Command(Lexer<'a, CommandToken<'a>>),
     #[default]
     Taken,
@@ -176,32 +225,12 @@ pub struct Tokenizer<'a> {
     stack: Vec<Mode>, // modes to return to, deepest first
 }
 
-// macro_rules! advance {
-//     ($self:expr, $lexer:expr,
-//         state $from:ident, wrap $wrap:ident,
-//         $( on $trans:pat => state $to:ident ),+ $(,)?
-//     ) =>
-//      {{
-//         match $lexer.next().map(|token| (token, $lexer.span())) {
-//             None         => { *$self = LexerState::$from($lexer); None }
-//             Some((Err(e), span))
-//             => { *$self = LexerState::$from($lexer); Some((Err(e), span)) }
-//             Some((Ok(tok), span)) => {
-//                 *$self = match &tok {
-//                     $( $trans => LexerState::$to($lexer.morph()), )+
-//                     _ => LexerState::$from($lexer),
-//                 };
-//                 Some((Ok(Token::$wrap(tok)), span))
-//             }
-//         }
-//     }};
-// }
-
 // transforms the current state by pooping a state from the state stack
 macro_rules! pop_to {
     ($stack:expr, $lexer:expr) => {
         match $stack.pop().expect("pop on empty mode stack") {
             Mode::Normal => LexerState::Normal($lexer.morph()),
+            Mode::String => LexerState::String($lexer.morph()),
             Mode::Command => LexerState::Command($lexer.morph()),
         }
     };
@@ -259,7 +288,13 @@ impl<'a> Iterator for Tokenizer<'a> {
             LexerState::Normal(mut lexer) => advance!(
                 self, lexer,
                 state Normal, wrap Normal,
-                on NormalToken::CommandStart => (enter Command)
+                on NormalToken::CommandStart => (enter Command),
+                on NormalToken::StringStart => (enter String)
+            ),
+            LexerState::String(mut lexer) => advance!(
+                self, lexer,
+                state String, wrap String,
+                on StringToken::StringEnd => (leave)
             ),
             LexerState::Command(mut lexer) => advance!(
                 self, lexer,

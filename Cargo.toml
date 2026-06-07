@@ -10,6 +10,7 @@ chumsky = "0.13.0"
 clap = { version = "4.6.1", features = ["derive"] }
 fs = "0.0.5"
 logos = "0.16.1"
+regex = "1.12.3"
 thiserror = "2.0.18"
 
 [dev-dependencies]

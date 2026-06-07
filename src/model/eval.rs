@@ -56,10 +56,17 @@ pub struct Fun<'a> {
     pub body: FunBody,
 }
 
+#[derive(Debug, Clone)]
+pub enum StringPart<'a> {
+    Splice { var: Var, span: error::Span },
+    Lit(Cow<'a, str>),
+}
+
 // The actual expression value
 #[derive(Debug, Default, Clone)]
 pub enum ExprKind<'a> {
     Lit(Value<'a>),
+    String(Vec<StringPart<'a>>),
     Var(Var),
     FunApp {
         fun: &'a Fun<'a>,
@@ -114,6 +121,18 @@ impl<'a> Expr<'a> {
                 fun.body.exec(&args_acc, ctx).with_opt_span(self.span)?
             }
             ExprKind::Unit => Value::Unit,
+            ExprKind::String(parts) => {
+                let mut s = String::new();
+                for part in parts {
+                    match part {
+                        StringPart::Splice { var, span } => s.push_str(
+                            &ctx.read_var(var).with_span(*span)?.to_string(),
+                        ),
+                        StringPart::Lit(cow) => s.push_str(cow),
+                    }
+                }
+                Value::String(Cow::Owned(s))
+            }
         })
     }
 }
@@ -156,7 +175,7 @@ pub struct Slots<'a>(pub Vec<Slot<'a>>);
 #[derive(Debug, Default)]
 pub struct Block<'a> {
     pub statements: Vec<Statement<'a>>,
-    pub empty_slots: Slots<'a>,
+    pub slots: Slots<'a>,
 }
 
 impl<'a> Block<'a> {
@@ -165,9 +184,8 @@ impl<'a> Block<'a> {
         ctx: &mut EvalContext<'outer, 'a>,
     ) -> Result<Value<'a>, error::Spanned<Error>> {
         // Create new stack frame
-        let mut this = EvalContext {
-            variables: ctx.variables,
-        };
+
+        let mut this = ctx.enter(self.slots.clone());
 
         let mut result = Value::Unit;
         for statement in &self.statements {
@@ -181,6 +199,15 @@ impl<'a> Block<'a> {
 pub struct EvalContext<'outer, 'a> {
     // TODO: constants
     pub variables: &'outer mut Vec<Slots<'a>>,
+}
+
+impl<'outer, 'a> EvalContext<'outer, 'a> {
+    fn enter(&mut self, frame: Slots<'a>) -> EvalContext<'_, 'a> {
+        self.variables.push(frame);
+        EvalContext {
+            variables: self.variables, // implicit reborrow for the '_ borrow
+        }
+    }
 }
 
 impl<'outer, 'a> Drop for EvalContext<'outer, 'a> {
@@ -203,7 +230,12 @@ impl<'outer, 'a> EvalContext<'outer, 'a> {
 
     fn init_var(&mut self, var: &Var, val: Value<'a>) -> Result<(), Error> {
         // The innermost scope is the *last* one
-        let ix = &self.variables.len() - var.nesting - 1;
+        eprintln!(
+            "init_var : len: {}, nesting: {}",
+            self.variables.len(),
+            var.nesting
+        );
+        let ix = self.variables.len() - var.nesting - 1;
         let slot = &mut (&mut self.variables[ix].0)[var.slot];
         match &slot.value {
             None => {

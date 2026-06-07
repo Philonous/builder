@@ -1,7 +1,7 @@
 target @dist/exe {
 
   # Declare variable for reuse
-  #let exe = "target/\"build\"/exe";
+  let exe = "target/\"build\"/exe";
 
   # Need accepts one ore more targets
   #need("Cargo.toml", "Cargo.lock");
@@ -13,17 +13,21 @@ target @dist/exe {
   `ls`;
   `df -h`;
 
-  print("Hello world");
-  print()
+  let foo="foo";
+  let bar="quux";
+  let bla="${foo}/${bar}";
+
+  print("Hello ${bla} World")
+  # print()
 
 }
 
-target() task("app") {
-  # need("dist/exe");
+# target() task("app") {
+#   # need("dist/exe");
 
-  # Tag is inherited from resource, ${} is variable use/interpolation
-  `docker build -t "${target}"`;
+#   # Tag is inherited from resource, ${} is variable use/interpolation
+#   `docker build -t "${target}"`;
 
-  print("test")
+#   print("test")
 
-}
+# }

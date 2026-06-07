@@ -4,7 +4,8 @@ use chumsky::{input::ValueInput, prelude::*};
 use std::borrow::Cow;
 
 use super::lexer::{
-    command, normal, CommandToken, NormalToken, Token, Tokenizer,
+    command, normal, string, CommandToken, NormalToken, StringToken, Token,
+    Tokenizer,
 };
 use super::string::Quoted;
 pub use crate::common::Ident;
@@ -97,12 +98,23 @@ impl<'tok> Arguments<'tok> {
             .map(Arguments)
     }
 }
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum StringExprPart<'a> {
+    Lit(Quoted<'a>),
+    Splice(Spanned<Ident<'a>>),
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct StringExpr<'a>(pub Vec<StringExprPart<'a>>);
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum ExprKind<'a> {
     Lit(Lit<'a>),
+    String(StringExpr<'a>),
     Ident(Ident<'a>),
     Command(Command<MaybeQuoted<'a>>),
-    FunApp(Ident<'a>, Arguments<'a>),
+    FunApp(Ident<'a>, Spanned<Arguments<'a>>),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -265,9 +277,13 @@ impl<'tok> Lit<'tok> {
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
+        // String consisting of a single lit part is a literal string
+        // We make this distinction because in some contexts, only
+        // literals are allowed
         select! {
-            normal!(StringLit(s)) => Lit::String(s),
+                string!(LitPart(s)) => Lit::String(s),
         }
+        .delimited_by(just(normal!(StringStart)), just(string!(StringEnd)))
     }
 }
 
@@ -291,6 +307,24 @@ impl<'tok> Command<MaybeQuoted<'tok>> {
     }
 }
 
+impl<'tok> StringExpr<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        select! {
+            string!(LitPart(s)) => StringExprPart::Lit(s),
+            string!(SpliceIdent(s)) = tok =>
+              StringExprPart::Splice(Spanned{ inner: Ident(s), span: tok.span()})
+        }
+        .repeated()
+        .collect()
+        .delimited_by(just(normal!(StringStart)), just(string!(StringEnd)))
+        .map(Self)
+    }
+}
+
 impl<'tok> Expr<'tok> {
     fn parse<'src: 'tok, I>(
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
@@ -300,13 +334,15 @@ impl<'tok> Expr<'tok> {
         recursive(|expr| {
             let arg_list = Arguments::parse(expr);
             let fun_app = Ident::parse()
-                .then(arg_list)
+                .then(arg_list.spanned())
                 .map(|(ident, params)| ExprKind::FunApp(ident, params));
             Command::parse()
                 .map(ExprKind::Command)
                 .or(fun_app)
                 .or(Lit::parse().map(ExprKind::Lit))
                 .or(Ident::parse().map(ExprKind::Ident))
+                // This has to come after Lit because they overlap
+                .or(StringExpr::parse().map(ExprKind::String))
                 .spanned()
                 .map(Expr)
         })
