@@ -64,7 +64,8 @@ impl<'a> Quoted<'a> {
                     Some('n') => out.push('\n'),
                     Some('r') => out.push('\r'),
                     Some('t') => out.push('\t'),
-                    Some('$') => out.push('$'),
+                    Some('{') => out.push('{'),
+                    Some('}') => out.push('}'),
                     Some(other) => {
                         return Err(QuoteError::UnknownEscape(other))
                     }

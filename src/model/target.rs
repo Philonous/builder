@@ -69,8 +69,7 @@ impl<'a> Target<'a> {
         let mut ctx = eval::EvalContext {
             variables: &mut vars,
         };
-        let res = self.commands.run(&mut ctx);
-        todo!()
+        self.commands.run(&mut ctx)
     }
 
     // Try to match the target to a single string (e.g. cli)

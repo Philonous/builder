@@ -106,12 +106,12 @@ impl fmt::Display for CommandToken<'_> {
     }
 }
 
-// Extract the variable of a splice, e.g. "${ my_var }" => "my_var"
+// Extract the variable of a splice, e.g. "{ my_var }" => "my_var"
 fn splice_name(s: &str) -> Option<&str> {
     // Expect sigil followed by identifier wrapped in braces with optional spaces
     // e.g. ${ my_variable } or #{testing-testing}
     let re = regex::Regex::new(
-        r#".\{[[:space:]]*([a-zA-Z_][a-zA-Z/-_]*)[[:space:]]*\}"#,
+        r#"\{[[:space:]]*([a-zA-Z_][a-zA-Z/-_]*)[[:space:]]*\}"#,
     )
     .expect("parsing regex");
     Some(re.captures(s)?.get(1)?.as_str())
@@ -119,14 +119,13 @@ fn splice_name(s: &str) -> Option<&str> {
 
 #[derive(Debug, Logos, PartialEq, Clone)]
 #[logos(error(LexError))]
-#[logos(subpattern char = r#"[^${"\\\x00-\x1F]"#)]
-#[logos(subpattern escape = r#"\\["\\nrt$]"#)]
-
+#[logos(subpattern char = r#"[^{}"\\\x00-\x1F]"#)]
+#[logos(subpattern escape = r#"\\["\\nrt{}]"#)]
 pub enum StringToken<'a> {
     // #[regex(r#"[^ `\"$\t\r\n\f]+"#, |lex| lex.slice())]
     #[regex(r#"((?&char)|(?&escape))+"#, |lex| Quoted{delim: '"', raw: lex.slice()})]
     LitPart(Quoted<'a>),
-    #[regex(r#"\$\{[[:space:]]*[a-zA-Z][a-zA-Z/_-]+[[:space:]]*\}"#, |lex| splice_name(lex.slice()))]
+    #[regex(r#"\{[[:space:]]*[a-zA-Z][a-zA-Z/_-]+[[:space:]]*\}"#, |lex| splice_name(lex.slice()))]
     SpliceIdent(&'a str),
     #[token(r#"""#)]
     StringEnd,

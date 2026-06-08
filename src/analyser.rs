@@ -400,7 +400,6 @@ impl<'a> parser::Block<'a> {
         }
 
         let empty_slots = this.detach();
-        eprintln!("Generated slots: {:?}", empty_slots);
         errors.ok(eval::Block {
             statements: resolved,
             slots: empty_slots,
@@ -547,17 +546,17 @@ impl<'a> parser::Ast<'a> {
         };
 
         let mut errors = Errors::empty();
-        let mut decls = Vec::with_capacity(self.decls.len());
+        let mut targets = Vec::with_capacity(self.decls.len());
         let mut scopes = Vec::new();
 
         for decl in self.decls {
-            decls.push(
+            targets.push(
                 decl.resolve(&ctx, &mut Scopes(&mut scopes), TARGET_TYPES)
                     .add_errors(&mut errors)
                     .unwrap_or_default(),
             );
         }
 
-        errors.ok(decl::Decls(decls))
+        errors.ok(decl::Decls(targets))
     }
 }

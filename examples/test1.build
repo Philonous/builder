@@ -10,14 +10,16 @@ target @dist/exe {
 
   # Actually build the code
   # command for runs the command
+
   `ls`;
   `df -h`;
 
   let foo="foo";
   let bar="quux";
-  let bla="${foo}/${bar}";
+  let bla="{foo}/{bar}";
 
-  print("Hello ${bla} World")
+  print("Hello {bla} World");
+  print("Hello $\{\} World")
   # print()
 
 }
