@@ -5,6 +5,16 @@ pub struct Command<'a> {
     pub args: Vec<Cow<'a, str>>,
 }
 
+impl<'a> std::fmt::Display for Command<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.executable)?;
+        for arg in self.args.iter() {
+            write!(f, " {}", arg)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("command finshed with error")]
@@ -20,6 +30,8 @@ impl<'a> Command<'a> {
         for arg in &self.args {
             proc.arg(&**arg);
         }
+
+        eprintln!("build: {}", self);
         // Execute command
         match proc.status() {
             Ok(status) => {
