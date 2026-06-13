@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, sync::Arc};
 
 use ariadne::Source;
 
@@ -12,6 +12,8 @@ mod process;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+
+use crate::model::{eval::Resolved, value::WithDisplayCtxExt};
 
 #[derive(clap::Parser, Debug)]
 #[command(name = "myapp")]
@@ -60,10 +62,7 @@ fn parse(src: &str) -> parser::parser::Ast<'_> {
     }
 }
 
-fn resolve<'a>(
-    src: &'a str,
-    ast: parser::parser::Ast<'a>,
-) -> model::decl::Decls<'a> {
+fn resolve<'a>(src: &'a str, ast: parser::parser::Ast<'a>) -> Resolved {
     match ast.resolve() {
         Ok(decls) => decls,
         Err(error::Errors(errs)) => {
@@ -80,7 +79,7 @@ fn resolve<'a>(
 fn main() {
     let Cli { file, command } = Cli::parse();
     let file = &file.unwrap_or(PathBuf::from("Buildfile"));
-    let src = fs::read_to_string(&file).expect("Failed to read file");
+    let src = Arc::new(fs::read_to_string(&file).expect("Failed to read file"));
 
     match command {
         Command::Check => {
@@ -89,27 +88,30 @@ fn main() {
         }
         Command::Run { item } => {
             let ast = parse(&src);
-            let decls = resolve(&src, ast);
-            let target = match decls.find_target_by_string(&item) {
+            let resolved = resolve(&src, ast);
+            let target = match resolved.targets.find_by_string(&item) {
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("{}", e);
                     std::process::exit(1)
                 }
             };
-            match target.run() {
+            match target.run(&resolved) {
                 Err(e) => {
                     eprintln!("{}", e);
                     std::process::exit(1)
                 }
-                Ok(val) => println!("{}", val),
+                Ok(val) => match val {
+                    model::eval::Value::Unit => (),
+                    _ => println!("{}", val.with_ctx(&resolved)),
+                },
             }
         }
         Command::Targets => {
             let ast = parse(&src);
-            let decls = resolve(&src, ast);
-            for decl in decls.0 {
-                println!("{:?}", decl.name);
+            let resolved = resolve(&src, ast);
+            for name in resolved.targets.names() {
+                println!("{:?}", name);
             }
         }
 

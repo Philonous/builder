@@ -44,11 +44,11 @@ impl<'a> Quoted<'a> {
     ///
     /// [`UnquoteError::UnknownEscape`] if `\` is followed by anything other
     /// than `\` or `close`.
-    pub fn unquote(&self) -> Result<Cow<'a, str>, QuoteError> {
+    pub fn unquote(&self) -> Result<String, QuoteError> {
         let s = &self.raw;
 
         let Some(first) = s.find('\\') else {
-            return Ok(Cow::Borrowed(s));
+            return Ok(s.to_string());
         };
 
         let (head, tail) = s.split_at(first);
@@ -78,6 +78,6 @@ impl<'a> Quoted<'a> {
                 out.push(c);
             }
         }
-        Ok(Cow::Owned(out))
+        Ok(out)
     }
 }

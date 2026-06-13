@@ -1,20 +1,13 @@
-use super::model::decl;
-use super::model::decl::Decls;
-use super::model::eval;
-use super::model::parameters;
-use super::model::target;
-use super::parser::parser;
-use crate::error::AddErrors;
-use crate::error::Errors;
-use crate::error::WithSpan;
-use crate::{
-    common::Ident,
-    error::{self, Spanned},
-    model::eval::Slots,
-    parser::string::QuoteError,
-};
+use lasso::{Interner, Resolver, Rodeo};
 
-use std::borrow::Cow;
+use super::model::{eval, parameters, target};
+use super::parser::parser;
+use crate::error::{self, AddErrors, Errors, Spanned, WithSpan};
+use crate::model::eval::{FunId, Functions, Slots};
+use crate::model::target::{TargetType, TargetTypeId, TargetTypes, Targets};
+use crate::model::value::{Ident, RecordPattern, RecordSchemas};
+use crate::parser::string::QuoteError;
+
 use std::ops::Deref;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,15 +28,29 @@ pub enum Error {
     ParamBareAfterKv,
     #[error("function {0} is not known")]
     FunNotFound(String),
+    #[error("{0}")]
+    TargetError(#[from] target::Error),
 }
 
-impl<'a> Slots<'a> {
+impl<'a> parser::Ident<'a> {
+    pub fn resolve(self, interner: &mut impl Interner) -> Ident {
+        Ident(interner.get_or_intern(self.0))
+    }
+}
+
+impl Slots {
     // Create a new variable in the current scope
-    fn new_variable(&mut self, name: &Ident<'a>) -> Result<eval::Var, Error> {
+    fn new_variable(
+        &mut self,
+        ctx: &Ctx,
+        name: Ident,
+    ) -> Result<eval::Var, Error> {
         // Check if the variable is already declared
         match self.find_variable(name) {
             Some(_) => {
-                return Err(Error::DuplicateVariable(name.to_string()));
+                return Err(Error::DuplicateVariable(
+                    ctx.resolve(name).to_string(),
+                ));
             }
             None => (),
         }
@@ -62,25 +69,29 @@ impl<'a> Slots<'a> {
         })
     }
 
-    fn find_variable(&self, name: &Ident<'a>) -> Option<usize> {
-        self.0.iter().position(|slot| &slot.name == name)
+    fn find_variable(&self, name: Ident) -> Option<usize> {
+        self.0.iter().position(|slot| slot.name == name)
     }
 }
 
-struct Scopes<'a, 'b>(&'b mut Vec<Slots<'a>>);
+struct Scopes<'b>(&'b mut Vec<Slots>);
 
-impl<'a, 'b> Scopes<'a, 'b> {
+impl<'b> Scopes<'b> {
     /// Push a fresh scope; the returned guard pops it when it leaves.
-    fn enter(&mut self) -> ScopeGuard<'a, '_> {
+    fn enter(&mut self) -> ScopeGuard<'_> {
         self.0.push(Slots(Vec::new()));
         ScopeGuard(Scopes(&mut *self.0)) // reborrow, so the guard can't outlive us
     }
 }
 
-struct ScopeGuard<'a, 'b>(Scopes<'a, 'b>);
+struct ScopeGuard<'b>(Scopes<'b>);
 
-impl<'a, 'b> ScopeGuard<'a, 'b> {
-    fn new_variable(&mut self, name: &Ident<'a>) -> Result<eval::Var, Error> {
+impl<'b> ScopeGuard<'b> {
+    fn new_variable(
+        &mut self,
+        ctx: &Ctx,
+        name: Ident,
+    ) -> Result<eval::Var, Error> {
         // Last element is the current scope where we want to create
         // the new variable
 
@@ -88,9 +99,13 @@ impl<'a, 'b> ScopeGuard<'a, 'b> {
              .0
             .last_mut()
             .expect("ScopeGuard: empty")
-            .new_variable(name)
+            .new_variable(ctx, name)
     }
-    fn find_variable(&self, name: &Ident<'a>) -> Result<eval::Var, Error> {
+    fn find_variable(
+        &self,
+        ctx: &mut Ctx,
+        name: Ident,
+    ) -> Result<eval::Var, Error> {
         // Iterate over all scopes (inner to outer). For each scope,
         // look for the variable. Return the innermost matching scope
         // + the slot
@@ -104,11 +119,13 @@ impl<'a, 'b> ScopeGuard<'a, 'b> {
                     .find_variable(name)
                     .map(|slot| eval::Var { slot, nesting })
             })
-            .ok_or_else(|| Error::UndefinedVariable(name.to_string()))
+            .ok_or_else(|| {
+                Error::UndefinedVariable(ctx.resolve(name).to_string())
+            })
     }
 
     /// Success path: pop and take ownership of the scope (e.g. to attach to a block).
-    fn detach(mut self) -> Slots<'a> {
+    fn detach(mut self) -> Slots {
         let Scopes(vec) = &mut self.0;
         let slots = vec.pop().expect("guard guarantees a live scope");
         std::mem::forget(self); // skip Drop so we don't pop twice
@@ -116,12 +133,12 @@ impl<'a, 'b> ScopeGuard<'a, 'b> {
     }
 
     /// Add a new nested scope
-    fn nested_scope(&mut self) -> &mut Scopes<'a, 'b> {
+    fn nested_scope(&mut self) -> &mut Scopes<'b> {
         &mut self.0
     }
 }
 
-impl<'a, 'b> Drop for ScopeGuard<'a, 'b> {
+impl<'b> Drop for ScopeGuard<'b> {
     fn drop(&mut self) {
         let Scopes(vec) = &mut self.0;
         vec.pop(); // error/early-return path
@@ -129,23 +146,37 @@ impl<'a, 'b> Drop for ScopeGuard<'a, 'b> {
 }
 
 impl<'a> parser::Lit<'a> {
-    pub fn resolve<'b>(self) -> Result<eval::Value<'a>, Error> {
+    pub fn resolve<'b>(self) -> Result<eval::Value, Error> {
         Ok(match self {
             parser::Lit::String(s) => eval::Value::String(s.unquote()?),
         })
     }
 }
 
-pub struct Ctx<'a> {
-    pub functions: &'a [eval::Fun<'a>], // constants
+pub struct Ctx<'fs> {
+    pub interner: &'fs mut Rodeo,
+    pub functions: &'fs Functions,
+    pub records: &'fs RecordSchemas,
+    pub target_types: &'fs TargetTypes,
+    // todo: constants
+}
+
+impl<'fs> Ctx<'fs> {
+    pub fn intern<'a>(&mut self, i: parser::Ident<'a>) -> Ident {
+        Ident(self.interner.get_or_intern(i.0))
+    }
+
+    pub fn resolve<'a>(&'a self, i: Ident) -> &'a str {
+        self.interner.resolve(&i.0)
+    }
 }
 
 impl<'a> parser::Expr<'a> {
     fn resolve<'b>(
         self,
-        ctx: &Ctx<'a>,
-        scopes: &mut ScopeGuard<'a, 'b>,
-    ) -> Result<eval::Expr<'a>, Errors<Error>> {
+        ctx: &'a mut Ctx,
+        scopes: &mut ScopeGuard<'b>,
+    ) -> Result<eval::Expr, Errors<Error>> {
         let mut errors = Errors::empty();
         let span = self.0.span.into();
         let kind = match self.0.inner {
@@ -156,31 +187,33 @@ impl<'a> parser::Expr<'a> {
                     .unwrap_or_default(),
             ),
 
-            parser::ExprKind::Ident(name) => scopes
-                .find_variable(&name)
-                .map(eval::ExprKind::Var)
-                .with_span(span)
-                .add_errors(&mut errors)
-                .unwrap_or_default(),
+            parser::ExprKind::Ident(name) => {
+                let ident = name.resolve(&mut ctx.interner);
+                scopes
+                    .find_variable(ctx, ident)
+                    .map(eval::ExprKind::Var)
+                    .with_span(span)
+                    .add_errors(&mut errors)
+                    .unwrap_or_default()
+            }
             parser::ExprKind::Command(cmd) => cmd
                 .resolve_strings()
                 .map(|parser::Command { executable, args }| {
-                    eval::ExprKind::Command { executable, args }
+                    eval::ExprKind::Command {
+                        executable: executable.to_string(),
+                        args,
+                    }
                 })
                 .with_span(span)
                 .add_errors(&mut errors)
                 .unwrap_or_default(),
-            parser::ExprKind::FunApp(ident, args) => {
-                (|| {
-                    let fun =
-                        match ctx.functions.iter().find(|f| f.name == ident) {
-                            None => Err(Spanned::spanned(
-                                Error::FunNotFound(ident.to_string()),
-                                span,
-                            ))
-                            .add_errors(&mut errors),
-                            Some(f) => Some(f),
-                        }?;
+            parser::ExprKind::FunApp(ast_ident, args) => (|| {
+                // Dealing with things that look like function
+                // applications: `foo(bar, quux=3)`, which can either
+                // be a function proper or a record constructor
+                let ident = ctx.intern(ast_ident);
+                // Check if it's a function
+                if let Some((ix, fun)) = ctx.functions.find(ident) {
                     let args_separate = args
                         .inner
                         .resolve(ctx, scopes)
@@ -188,17 +221,42 @@ impl<'a> parser::Expr<'a> {
 
                     let args = fun
                         .parameters
-                        .match_arguments(error::Spanned {
-                            inner: &args_separate,
-                            span: Some(args.span.into()),
-                        })
+                        .match_arguments(
+                            &ctx.interner,
+                            error::Spanned {
+                                inner: &args_separate,
+                                span: Some(args.span.into()),
+                            },
+                        )
                         .add_errors(&mut errors)?;
-                    Some(eval::ExprKind::FunApp { fun, args })
+                    Some(eval::ExprKind::FunApp { fun: ix, args })
+                // Check if it's a record
+                } else if let Some((ix, record)) = ctx.records.find(ident) {
+                    let args_separate = args
+                        .inner
+                        .resolve(ctx, scopes)
+                        .add_errors(&mut errors)?;
 
-                    // args.
-                })()
-                .unwrap_or_default()
-            }
+                    let fields = record
+                        .fields
+                        .match_arguments(
+                            &ctx.interner,
+                            error::Spanned {
+                                inner: &args_separate,
+                                span: Some(args.span.into()),
+                            },
+                        )
+                        .add_errors(&mut errors)?;
+                    Some(eval::ExprKind::Record { schema: ix, fields })
+                } else {
+                    Err(Spanned::spanned(
+                        Error::FunNotFound(ast_ident.to_string()),
+                        span,
+                    ))
+                    .add_errors(&mut errors)?
+                }
+            })()
+            .unwrap_or_default(),
             parser::ExprKind::String(string_expr) => {
                 let mut parts = Vec::with_capacity(string_expr.0.len());
                 for part in string_expr.0 {
@@ -210,15 +268,16 @@ impl<'a> parser::Expr<'a> {
                                 .add_errors(&mut errors)
                                 .map(|s| parts.push(eval::StringPart::Lit(s)));
                         }
-                        parser::StringExprPart::Splice(ident) => {
+                        parser::StringExprPart::Splice(ast_ident) => {
+                            let ident = ctx.intern(ast_ident.inner);
                             scopes
-                                .find_variable(&ident.inner)
-                                .with_span(ident.span)
+                                .find_variable(ctx, ident)
+                                .with_span(ast_ident.span)
                                 .add_errors(&mut errors)
                                 .map(|s| {
                                     parts.push(eval::StringPart::Splice {
                                         var: s,
-                                        span: ident.span.into(),
+                                        span: ast_ident.span.into(),
                                     })
                                 });
                         }
@@ -237,9 +296,9 @@ impl<'a> parser::Expr<'a> {
 impl<'a> parser::Arguments<'a> {
     fn resolve<'b>(
         self,
-        ctx: &Ctx<'a>,
-        scopes: &mut ScopeGuard<'a, 'b>,
-    ) -> Result<parameters::Arguments<'a, eval::Expr<'a>>, Errors<Error>> {
+        ctx: &'a mut Ctx,
+        scopes: &mut ScopeGuard<'b>,
+    ) -> Result<parameters::Arguments<eval::Expr>, Errors<Error>> {
         let mut errors = error::Errors::empty();
         let mut positional = Vec::new();
         let mut key_value = Vec::new();
@@ -265,8 +324,10 @@ impl<'a> parser::Arguments<'a> {
                 parser::Argument::Named { name, expr } => {
                     let expr =
                         expr.resolve(ctx, scopes).add_errors(&mut errors);
+                    let ident = ctx.intern(name);
                     expr.map(|expr| {
-                        key_value.push(Spanned::spanned((name, expr), arg.span))
+                        key_value
+                            .push(Spanned::spanned((ident, expr), arg.span))
                     });
                 }
             }
@@ -280,8 +341,9 @@ impl<'a> parser::Arguments<'a> {
 }
 
 impl<'a> parser::Patterns<'a> {
-    pub fn resolve<'b>(
+    pub fn resolve(
         self,
+        ctx: &mut Ctx,
     ) -> Result<parameters::PatternArguments<'a>, Errors<Error>> {
         let mut errors = error::Errors::empty();
         let mut positional = Vec::new();
@@ -294,8 +356,9 @@ impl<'a> parser::Patterns<'a> {
                 // Treat a bare variable pattern as a pun,
                 // e.g. `foo` => `foo = foo`
                 parser::Pattern::Bare(parser::PatternKind::Bind(var)) => {
+                    let ident = var.resolve(&mut ctx.interner);
                     key_value.push(Spanned::spanned(
-                        (var, parameters::Pattern::Bind(var)),
+                        (ident, parameters::Pattern::Bind(ident)),
                         span,
                     ));
                 }
@@ -340,10 +403,15 @@ impl<'a> parser::Patterns<'a> {
                             parameters::Pattern::Literal(val)
                         }
                         parser::PatternKind::Bind(var) => {
-                            parameters::Pattern::Bind(var)
+                            parameters::Pattern::Bind(
+                                var.resolve(&mut ctx.interner),
+                            )
                         }
                     };
-                    key_value.push(Spanned::spanned((name, res), span));
+                    key_value.push(Spanned::spanned(
+                        (name.resolve(&mut ctx.interner), res),
+                        span,
+                    ));
                 }
             }
         }
@@ -360,12 +428,12 @@ impl<'a> parser::Patterns<'a> {
 impl<'a> parser::Block<'a> {
     fn resolve<'scopes>(
         self,
-        ctx: &Ctx<'a>,
-        outer: &mut Scopes<'a, 'scopes>,
-    ) -> Result<eval::Block<'a>, Errors<Error>> {
+        ctx: &mut Ctx<'_>,
+        outer: &mut Scopes<'scopes>,
+    ) -> Result<eval::Block, Errors<Error>> {
         let mut errors = Errors::empty();
         let mut this = outer.enter();
-        let mut resolved: Vec<eval::Statement<'a>> =
+        let mut resolved: Vec<eval::Statement> =
             Vec::with_capacity(self.0.len());
         for statement in self.0 {
             let stmt = match statement {
@@ -377,8 +445,9 @@ impl<'a> parser::Block<'a> {
                     let expr =
                         expr.resolve(ctx, &mut this).add_errors(&mut errors);
                     // Now create variable in inner scope
+                    let name = ident.resolve(&mut ctx.interner);
                     let var = this
-                        .new_variable(&ident.inner)
+                        .new_variable(ctx, name)
                         .with_span(ident.span)
                         .add_errors(&mut errors);
                     // Create resolved statement if both var and expr are `Some`
@@ -408,47 +477,54 @@ impl<'a> parser::Block<'a> {
 }
 
 impl<'a> parser::Decl<'a> {
-    fn resolve_target<'scopes>(
-        ctx: &Ctx<'a>,
-        kind: &'a target::TargetType<'a>,
-        outer: &mut Scopes<'a, 'scopes>,
-        parameters: parameters::Patterns<'a>,
+    fn resolve_target<'b>(
+        ctx: &mut Ctx<'_>,
+        kind: &TargetType,
+        type_id: TargetTypeId,
+        outer: &mut Scopes<'b>,
+        parameters: parameters::Patterns,
         block: parser::Block<'a>,
-        // We only have targets as decls for now
-    ) -> Result<target::Target<'a>, Errors<Error>> {
+    ) -> Result<target::Target, Errors<Error>> {
         // target Constr(patter1, pattern2, ...)
 
-        let mut this = outer.enter();
+        let mut this_scope = outer.enter();
         let mut errors: Errors<Error> = Errors::empty();
 
         // Resolve target patterns
         let name = match &parameters.0[kind.name_is] {
-            parameters::Pattern::Literal(value) => Some(value.to_string()),
+            parameters::Pattern::Literal(eval::Value::String(s)) => {
+                Some(s.clone())
+            }
             _ => None,
         };
 
         // Add Arguments to the current scope
         // (As defined by the target type)
         // Maybe we should add a namespace prefix, like "target:"
-        for (name, param) in kind.parameters.0.deref().iter() {
-            this.new_variable(&name)
+        for (name, param) in ctx.records[kind.schema].fields.0.deref().iter() {
+            this_scope
+                .new_variable(ctx, *name)
                 .with_opt_span(param.span)
                 .add_errors(&mut errors);
         }
 
         // Resolve the command block
         let block = block
-            .resolve(ctx, this.nested_scope())
+            .resolve(ctx, this_scope.nested_scope())
             .add_errors(&mut errors)
             .unwrap_or_default();
 
-        let slots = this.detach();
+        let slots = this_scope.detach();
 
+        let pattern = RecordPattern {
+            schema: kind.schema,
+            patterns: parameters,
+        };
         let target = target::Target {
-            kind,
-            parameters,
+            kind: type_id,
             name,
-            commands: block,
+            pattern,
+            block,
             slots,
         };
 
@@ -457,25 +533,31 @@ impl<'a> parser::Decl<'a> {
 
     fn resolve<'scopes>(
         self,
-        ctx: &Ctx<'a>,
-        outer: &mut Scopes<'a, 'scopes>,
-        target_types: &'a [target::TargetType<'a>],
-    ) -> Result<target::Target<'a>, Errors<Error>> {
+        ctx: &mut Ctx<'_>,
+        outer: &mut Scopes<'scopes>,
+    ) -> Result<target::Target, Errors<Error>> {
         let mut errors: Errors<Error> = Errors::empty();
 
         let target = match self {
             parser::Decl::Target { args, ident, block } => match ident {
                 parser::TargetIdent::AtTarget(s) => {
-                    let kind = &target::TARGET_TYPE_FILE;
+                    let name = Ident(ctx.interner.get_or_intern_static("file"));
+                    let (schema, _) =
+                        ctx.records.find(name).expect("file record schema");
+                    let (type_id, target_type) = ctx
+                        .target_types
+                        .find(schema)
+                        .expect("file target type");
                     let patterns = vec![
                         (parameters::Pattern::Literal(eval::Value::String(
-                            Cow::Borrowed(s),
+                            String::from(s),
                         ))),
                     ];
 
                     parser::Decl::resolve_target(
                         ctx,
-                        kind,
+                        target_type,
+                        type_id,
                         outer,
                         parameters::Patterns(patterns),
                         block,
@@ -483,16 +565,23 @@ impl<'a> parser::Decl<'a> {
                     .add_errors(&mut errors)
                     .unwrap_or_default()
                 }
-                parser::TargetIdent::Normal { name, pattern } => {
-                    let target_type = target_types
-                        .iter()
-                        .find(|tt| tt.name == name.inner)
-                        .ok_or(Error::UnknownTargetType(name.inner.to_string()))
-                        .with_span(name.span)
-                        .add_errors(&mut errors);
+                parser::TargetIdent::Normal {
+                    name: ast_name,
+                    pattern,
+                } => {
+                    let name = ctx.intern(ast_name.inner);
+                    let target_type = (|| {
+                        let (schema_id, schema) = ctx.records.find(name)?;
+                        let (type_id, target_type) =
+                            ctx.target_types.find(schema_id)?;
+                        Some((target_type, type_id, schema))
+                    })()
+                    .ok_or(Error::UnknownTargetType(ast_name.inner.to_string()))
+                    .with_span(ast_name.span)
+                    .add_errors(&mut errors);
 
                     // Resolve pattern
-                    let pattern = pattern.resolve().add_errors(&mut errors);
+                    let pattern = pattern.resolve(ctx).add_errors(&mut errors);
 
                     match target_type.zip(pattern) {
                         // Previous error, skip checking pattern
@@ -503,10 +592,13 @@ impl<'a> parser::Decl<'a> {
                         }
 
                         // Match patterns to parameters
-                        Some((target_type, pattern)) => {
-                            let pattern = target_type
-                                .parameters
-                                .match_pattern_arguments(&pattern)
+                        Some(((target_type, type_id, schema), pattern)) => {
+                            let pattern = schema
+                                .fields
+                                .match_pattern_arguments(
+                                    &ctx.interner,
+                                    &pattern,
+                                )
                                 .add_errors(&mut errors);
                             match pattern {
                                 None => Default::default(),
@@ -515,6 +607,7 @@ impl<'a> parser::Decl<'a> {
                                 Some(args) => parser::Decl::resolve_target(
                                     ctx,
                                     target_type,
+                                    type_id,
                                     outer,
                                     args,
                                     block,
@@ -531,32 +624,62 @@ impl<'a> parser::Decl<'a> {
         errors.ok(target)
 
         // Target may want to set special parameters, e.g. resolved path
-
-        // Ok(target::Target { kind: self })
     }
 }
 
-static TARGET_TYPES: &[target::TargetType<'static>] =
-    &[target::TARGET_TYPE_FILE, target::TARGET_TYPE_TASK];
+fn register_builtin_target_types(
+    interner: &mut Rodeo,
+    records: &mut RecordSchemas,
+    target_types: &mut TargetTypes,
+) -> Result<(), Error> {
+    target::register_target_type_file(interner, records, target_types)?;
+    target::register_target_type_task(interner, records, target_types)?;
+    Ok(())
+}
 
 impl<'a> parser::Ast<'a> {
-    pub fn resolve(self) -> Result<Decls<'a>, Errors<Error>> {
-        let ctx = Ctx {
-            functions: eval::BUILTIN_FUNCTIONS,
-        };
-
+    pub fn resolve(self) -> Result<eval::Resolved, Errors<Error>> {
         let mut errors = Errors::empty();
-        let mut targets = Vec::with_capacity(self.decls.len());
+
+        let mut interner = Rodeo::new();
+        let functions = eval::builtin_functions(&mut interner);
+        let mut target_types = Default::default();
+        let mut records = Default::default();
+
+        register_builtin_target_types(
+            &mut interner,
+            &mut records,
+            &mut target_types,
+        )
+        .expect("register builtins");
+
+        let mut targets: Targets = Default::default();
         let mut scopes = Vec::new();
 
+        let mut ctx = Ctx {
+            interner: &mut interner,
+            functions: &functions,
+            records: &records,
+            target_types: &target_types,
+        };
         for decl in self.decls {
-            targets.push(
-                decl.resolve(&ctx, &mut Scopes(&mut scopes), TARGET_TYPES)
-                    .add_errors(&mut errors)
-                    .unwrap_or_default(),
-            );
+            let t = decl
+                .resolve(&mut ctx, &mut Scopes(&mut scopes))
+                .add_errors(&mut errors)
+                .unwrap_or_default();
+            targets
+                .add(t)
+                .without_span()
+                .add_errors(&mut errors)
+                .unwrap_or_default();
         }
 
-        errors.ok(decl::Decls(targets))
+        errors.ok(eval::Resolved {
+            functions,
+            resolver: interner.into_resolver(),
+            records,
+            target_types,
+            targets,
+        })
     }
 }

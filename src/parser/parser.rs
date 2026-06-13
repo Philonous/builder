@@ -8,7 +8,21 @@ use super::lexer::{
     Tokenizer,
 };
 use super::string::Quoted;
-pub use crate::common::Ident;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Ident<'a>(pub &'a str);
+
+impl<'a> std::fmt::Display for Ident<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<'a> Default for Ident<'a> {
+    fn default() -> Self {
+        Self("")
+    }
+}
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Lit<'a> {
@@ -30,9 +44,9 @@ pub enum MaybeQuoted<'a> {
 }
 
 impl<'a> MaybeQuoted<'a> {
-    fn resolve(&self) -> Result<Cow<'a, str>, QuoteError> {
+    fn resolve(&self) -> Result<String, QuoteError> {
         Ok(match self {
-            Self::Unquoted(s) => Cow::Borrowed(*s),
+            Self::Unquoted(s) => String::from(*s),
             Self::Quoted(q) => q.unquote()?,
         })
     }
@@ -45,7 +59,7 @@ pub struct Command<S: Clone + PartialEq + std::fmt::Debug> {
 }
 
 impl<'a> Command<MaybeQuoted<'a>> {
-    pub fn resolve_strings(self) -> Result<Command<Cow<'a, str>>, QuoteError> {
+    pub fn resolve_strings(self) -> Result<Command<String>, QuoteError> {
         let executable = self.executable.resolve()?;
         let mut args = Vec::with_capacity(self.args.len());
         for part in &self.args {

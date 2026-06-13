@@ -3,58 +3,32 @@ use crate::error::{self, AddErrors, Errors, Span, Spanned, WithSpan};
 use std::{collections::HashSet, ops::Deref};
 use thiserror;
 
-use super::base::{Ident, Value};
+use super::value::{Ident, Value};
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Parameter<'a> {
-    pub default: Option<Value<'a>>,
+pub struct Parameter {
+    pub default: Option<Value>,
     pub span: Option<Span>,
 }
 
-// Custom enum to deal with lifetime variance
-// Default cow is invariant in lifetimes that appear in the
-// wrapped type, because it needs to hold an associated type parameter
-#[derive(Debug)]
-pub enum CowSlice<'a, T> {
-    Borrowed(&'a [T]),
-    Owned(Vec<T>),
-}
-
-impl<'a, T> Default for CowSlice<'a, T> {
-    fn default() -> Self {
-        Self::Borrowed(&[])
-    }
-}
-
-impl<'a, T> Deref for CowSlice<'a, T> {
-    type Target = [T];
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Borrowed(s) => *s,
-            Self::Owned(v) => &**v,
-        }
-    }
-}
+#[derive(Debug, Default, Clone)]
+pub struct Parameters(pub Vec<(Ident, Parameter)>);
 
 #[derive(Debug, Default)]
-pub struct Parameters<'a>(pub CowSlice<'a, (Ident<'a>, Parameter<'a>)>);
-
-#[derive(Debug, Default)]
-pub struct Arguments<'a, V> {
+pub struct Arguments<V> {
     pub positional: Vec<Spanned<V>>,
-    pub key_value: Vec<Spanned<(Ident<'a>, V)>>,
+    pub key_value: Vec<Spanned<(Ident, V)>>,
 }
 
 #[derive(Debug, Clone)]
-pub enum Pattern<'a> {
-    Literal(Value<'a>),
-    Bind(Ident<'a>),
+pub enum Pattern {
+    Literal(Value),
+    Bind(Ident),
     Wildcard,
 }
 
-impl<'a> Pattern<'a> {
-    pub fn matches(&self, v: &Value<'a>) -> bool {
+impl<'a> Pattern {
+    pub fn matches(&self, v: &Value) -> bool {
         match self {
             Pattern::Bind(_) => true,
             Pattern::Literal(l) => l == v,
@@ -63,13 +37,13 @@ impl<'a> Pattern<'a> {
     }
 }
 
-pub type PatternArguments<'a> = Arguments<'a, Pattern<'a>>;
+pub type PatternArguments<'a> = Arguments<Pattern>;
 
 #[derive(Debug, Default)]
-pub struct Patterns<'a>(pub Vec<Pattern<'a>>);
+pub struct Patterns(pub Vec<Pattern>);
 
-impl<'a> Patterns<'a> {
-    pub fn matches(&self, vals: &Vec<Value<'a>>) -> bool {
+impl<'a> Patterns {
+    pub fn matches(&self, vals: &Vec<Value>) -> bool {
         debug_assert_eq!(self.0.len(), vals.len());
         self.0
             .iter()
@@ -94,13 +68,14 @@ pub enum MatchError {
     MissingRequired(String),
 }
 
-impl<'a> Parameters<'a> {
+impl Parameters {
     /// Bind positional and keyword arguments to parameter slots in declaration
     /// order. Reports arity overflow and unknown/duplicate/repeated keywords.
     /// Unfilled slots are left `None` for the caller to resolve.
     fn bind<V: Clone>(
         &self,
-        args: &Arguments<'a, V>,
+        resolver: &impl lasso::Resolver,
+        args: &Arguments<V>,
         errors: &mut Errors<MatchError>,
     ) -> Vec<Option<V>> {
         let mut slots: Vec<Option<V>> = vec![None; self.0.len()];
@@ -121,51 +96,58 @@ impl<'a> Parameters<'a> {
         }
 
         // 2. Keyword, in source order: repeated / unknown / clashes-with-positional.
-        let mut seen: HashSet<&Ident<'a>> = HashSet::new();
+        let mut seen: HashSet<&Ident> = HashSet::new();
         for arg in &args.key_value {
             let (name, value) = &arg.inner;
             let span = arg.span;
             if !seen.insert(name) {
-                let _: Option<()> =
-                    Err(MatchError::RepeatedKeyword(name.to_string()))
-                        .with_opt_span(span)
-                        .add_errors(errors);
+                let _: Option<()> = Err(MatchError::RepeatedKeyword(
+                    String::from(resolver.resolve(&name.0)),
+                ))
+                .with_opt_span(span)
+                .add_errors(errors);
             } else if let Some(idx) = self.0.iter().position(|(p, _)| p == name)
             {
                 if idx < n {
-                    let _: Option<()> =
-                        Err(MatchError::DuplicateArgument(name.to_string()))
-                            .with_opt_span(span)
-                            .add_errors(errors);
+                    let _: Option<()> = Err(MatchError::DuplicateArgument(
+                        String::from(resolver.resolve(&name.0)),
+                    ))
+                    .with_opt_span(span)
+                    .add_errors(errors);
                 } else {
                     slots[idx] = Some(value.clone());
                 }
             } else {
-                let _: Option<()> =
-                    Err(MatchError::UnknownKeyword(name.to_string()))
-                        .with_opt_span(span)
-                        .add_errors(errors);
+                let _: Option<()> = Err(MatchError::UnknownKeyword(
+                    String::from(resolver.resolve(&name.0)),
+                ))
+                .with_opt_span(span)
+                .add_errors(errors);
             }
         }
 
         slots
     }
 
-    pub fn match_arguments<V: Clone + From<Value<'a>>>(
+    // Might better be called "resolve" since this is run in the
+    // analyser, during evaluation the shape has already been fixed
+    pub fn match_arguments<V: Clone + From<Value>>(
         &self,
-        args: error::Spanned<&Arguments<'a, V>>,
+        resolver: &impl lasso::Resolver,
+        args: error::Spanned<&Arguments<V>>,
     ) -> Result<Vec<V>, Errors<MatchError>> {
         let mut errors = Errors::empty();
-        let mut slots = self.bind(args.inner, &mut errors);
+        let mut slots = self.bind(resolver, args.inner, &mut errors);
         // Required coverage, in declaration order; fill in defaults.
         for (idx, (name, param)) in self.0.iter().enumerate() {
             if slots[idx].is_none() {
                 match &param.default {
                     None => {
-                        let _: Option<()> =
-                            Err(MatchError::MissingRequired(name.to_string()))
-                                .with_opt_span(args.span)
-                                .add_errors(&mut errors);
+                        let _: Option<()> = Err(MatchError::MissingRequired(
+                            String::from(resolver.resolve(&name.0)),
+                        ))
+                        .with_opt_span(args.span)
+                        .add_errors(&mut errors);
                     }
                     Some(default) => slots[idx] = Some(default.clone().into()),
                 }
@@ -180,10 +162,11 @@ impl<'a> Parameters<'a> {
 
     pub fn match_pattern_arguments(
         &self,
-        args: &PatternArguments<'a>,
-    ) -> Result<Patterns<'a>, Errors<MatchError>> {
+        resolver: &impl lasso::Resolver,
+        args: &PatternArguments,
+    ) -> Result<Patterns, Errors<MatchError>> {
         let mut errors = Errors::empty();
-        let slots = self.bind(args, &mut errors);
+        let slots = self.bind(resolver, args, &mut errors);
 
         if !errors.0.is_empty() {
             return Err(errors);
