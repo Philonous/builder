@@ -3,7 +3,7 @@ use lasso::{Interner, Resolver, Rodeo};
 use super::model::{eval, parameters, target};
 use super::parser::parser;
 use crate::error::{self, AddErrors, Errors, Spanned, WithSpan};
-use crate::model::eval::{FunId, Functions, Slots};
+use crate::model::eval::{Functions, Slots};
 use crate::model::target::{TargetType, TargetTypeId, TargetTypes, Targets};
 use crate::model::value::{Ident, RecordPattern, RecordSchemas};
 use crate::parser::string::QuoteError;
@@ -501,7 +501,9 @@ impl<'a> parser::Decl<'a> {
         // Add Arguments to the current scope
         // (As defined by the target type)
         // Maybe we should add a namespace prefix, like "target:"
-        for (name, param) in ctx.records[kind.schema].fields.0.deref().iter() {
+        for (name, param) in
+            ctx.records[kind.request_schema].fields.0.deref().iter()
+        {
             this_scope
                 .new_variable(ctx, *name)
                 .with_opt_span(param.span)
@@ -517,7 +519,7 @@ impl<'a> parser::Decl<'a> {
         let slots = this_scope.detach();
 
         let pattern = RecordPattern {
-            schema: kind.schema,
+            schema: kind.request_schema,
             patterns: parameters,
         };
         let target = target::Target {
@@ -546,7 +548,7 @@ impl<'a> parser::Decl<'a> {
                         ctx.records.find(name).expect("file record schema");
                     let (type_id, target_type) = ctx
                         .target_types
-                        .find(schema)
+                        .find_by_request(schema)
                         .expect("file target type");
                     let patterns = vec![
                         (parameters::Pattern::Literal(eval::Value::String(
@@ -573,7 +575,7 @@ impl<'a> parser::Decl<'a> {
                     let target_type = (|| {
                         let (schema_id, schema) = ctx.records.find(name)?;
                         let (type_id, target_type) =
-                            ctx.target_types.find(schema_id)?;
+                            ctx.target_types.find_by_request(schema_id)?;
                         Some((target_type, type_id, schema))
                     })()
                     .ok_or(Error::UnknownTargetType(ast_name.inner.to_string()))

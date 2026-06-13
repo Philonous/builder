@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use super::eval;
 use super::parameters::{Parameter, Parameters};
 use super::value::record;
 use super::value::Ident;
-use super::value::{RecordPattern, RecordSchema, RecordSchemas, Value};
+use super::value::{RecordPattern, RecordSchemas, Value};
 use crate::error;
 use crate::model::eval::RecordId;
 use lasso::Rodeo;
@@ -19,11 +17,16 @@ pub enum Error {
     TargetFoundMultiple(String),
 }
 
+// pub enum TraceFun {
+//     Builtin (fn (&Record) -> )
+// }
+
 #[derive(Debug, Default)]
 pub struct TargetType {
     // Schema that defines how we refer to targets of this type
-    pub schema: RecordId,
+    pub request_schema: RecordId,
     pub name_is: usize,
+    // pub gen_trace:
 }
 
 #[derive(Debug, Default)]
@@ -45,33 +48,30 @@ impl TargetTypes {
         &mut self,
         interner: &mut Rodeo,
         records: &mut RecordSchemas,
-        name: &str,
-        fields: Parameters,
+        request_name: &str,
+        request_fields: Parameters,
         name_is: usize,
     ) -> Result<TargetTypeId, Error> {
-        match records.register(interner, name, fields) {
-            Ok(rid) => {
-                // No point checking for existince of this target
-                // underlying record has just been minted, so it can't
-                // exist in the table by construction
-                self.0.push(TargetType {
-                    schema: rid,
-                    name_is,
-                });
-                return Ok(TargetTypeId(self.0.len() - 1));
-            }
-            Err(record::Error::DuplicateRecordSchema(s)) => {
-                Err(Error::DuplicateTargetType(s))
-            }
-        }
+        let req_id = records
+            .register(interner, request_name, request_fields)
+            .map_err(|record::Error::DuplicateRecordSchema(s)| {
+            Error::DuplicateTargetType(s)
+        })?;
+
+        self.0.push(TargetType {
+            request_schema: req_id,
+
+            name_is,
+        });
+        return Ok(TargetTypeId(self.0.len() - 1));
     }
 
-    pub fn find(
+    pub fn find_by_request(
         &self,
         schema: RecordId,
     ) -> Option<(TargetTypeId, &TargetType)> {
         self.0.iter().enumerate().find_map(|(ix, tt)| {
-            if tt.schema == schema {
+            if tt.request_schema == schema {
                 Some((TargetTypeId(ix), tt))
             } else {
                 None
@@ -85,15 +85,11 @@ pub fn register_target_type_file(
     records: &mut RecordSchemas,
     target_types: &mut TargetTypes,
 ) -> Result<TargetTypeId, Error> {
-    let path = interner.get_or_intern("path");
-    let parameters = Parameters(vec![(
-        Ident(path),
-        Parameter {
-            default: None,
-            span: None,
-        },
-    )]);
-    target_types.register(interner, records, "file", parameters, 0)
+    let request_parameters = Parameters::builder(interner)
+        .add_static("path", None)
+        .build();
+
+    target_types.register(interner, records, "file", request_parameters, 0)
 }
 
 pub fn register_target_type_task(
@@ -115,7 +111,9 @@ pub fn register_target_type_task(
 #[derive(Debug, Default)]
 pub struct Target {
     pub kind: TargetTypeId,
+    // Display name, mostly for CLI
     pub name: Option<String>,
+    // Determine if requested resource can be built by this target
     pub pattern: RecordPattern,
     // Resolved variable slots for running the block
     pub slots: eval::Slots,

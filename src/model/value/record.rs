@@ -1,7 +1,6 @@
 use std::fmt::Display;
-use std::sync::Arc;
 
-use lasso::{Key, Rodeo};
+use lasso::Rodeo;
 
 use crate::model::eval::RecordId;
 use crate::model::value::display::WithDisplayCtxExt as _;
@@ -84,6 +83,7 @@ impl<'a> DisplayWith for Record {
     ) -> std::fmt::Result {
         let schema = &ctx.records[self.schema];
         schema.name.with_ctx(ctx).fmt(f)?;
+        write!(f, "(")?;
         let mut it = schema.fields.0.iter().zip(self.values.iter());
         if let Some(((name, _param), value)) = it.next() {
             write!(f, "{}={}", name.with_ctx(ctx), value.with_ctx(ctx))?;

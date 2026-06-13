@@ -1,6 +1,6 @@
 //! Handling of parameters and arguments
 use crate::error::{self, AddErrors, Errors, Span, Spanned, WithSpan};
-use std::{collections::HashSet, ops::Deref};
+use std::collections::HashSet;
 use thiserror;
 
 use super::value::{Ident, Value};
@@ -13,6 +13,39 @@ pub struct Parameter {
 
 #[derive(Debug, Default, Clone)]
 pub struct Parameters(pub Vec<(Ident, Parameter)>);
+
+pub struct ParametersBuilder<'a, I> {
+    interner: &'a mut I,
+    parameters: Vec<(Ident, Parameter)>,
+}
+
+impl<'a, I> ParametersBuilder<'a, I> {
+    pub fn build(self) -> Parameters {
+        Parameters(self.parameters)
+    }
+    pub fn add_static(mut self, name: &str, default: Option<Value>) -> Self
+    where
+        I: lasso::Interner,
+    {
+        self.parameters.push((
+            Ident(self.interner.get_or_intern(name)),
+            Parameter {
+                default,
+                span: None,
+            },
+        ));
+        self
+    }
+}
+
+impl Parameters {
+    pub fn builder<'a, I>(interner: &'a mut I) -> ParametersBuilder<'a, I> {
+        ParametersBuilder {
+            interner,
+            parameters: Vec::new(),
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Arguments<V> {

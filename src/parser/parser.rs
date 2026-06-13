@@ -1,7 +1,6 @@
 use super::string::QuoteError;
 use chumsky::input::Stream;
 use chumsky::{input::ValueInput, prelude::*};
-use std::borrow::Cow;
 
 use super::lexer::{
     command, normal, string, CommandToken, NormalToken, StringToken, Token,

@@ -28,6 +28,7 @@ pub enum Value {
     Unit,
     String(String),
     Record(Record),
+    Int(i64),
 }
 
 impl DisplayWith for Value {
@@ -36,6 +37,7 @@ impl DisplayWith for Value {
             Value::Unit => write!(f, "()"),
             Value::String(s) => write!(f, "{}", s),
             Value::Record(record) => write!(f, "{}", record.with_ctx(ctx)),
+            Value::Int(i) => write!(f, "{}", i),
         }
     }
 }
