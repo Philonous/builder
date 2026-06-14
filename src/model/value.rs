@@ -3,6 +3,7 @@ pub mod record;
 
 use std::fmt;
 
+use super::eval::{self, Resolved};
 pub use display::{DisplayCtx, DisplayWith, WithDisplayCtxExt};
 use lasso::Spur;
 pub use record::{Record, RecordPattern, RecordSchema, RecordSchemas};
@@ -22,6 +23,25 @@ impl DisplayWith for Ident {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Type {
+    Unit,
+    String,
+    Record(String),
+    Int,
+}
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::Unit => write!(f, "()"),
+            Type::String => write!(f, "string"),
+            Type::Record(s) => write!(f, "record {}", s),
+            Type::Int => write!(f, "int"),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Default)]
 pub enum Value {
     #[default]
@@ -29,6 +49,32 @@ pub enum Value {
     String(String),
     Record(Record),
     Int(i64),
+}
+
+impl Value {
+    pub fn type_of(&self, resolved: &Resolved) -> Type {
+        match self {
+            Self::Unit => Type::Unit,
+            Self::String(_) => Type::String,
+            Self::Record(record) => {
+                Type::Record(resolved[resolved[record.schema].name].to_owned())
+            }
+            Self::Int(_) => Type::Int,
+        }
+    }
+
+    pub fn expect_string(
+        &self,
+        resolved: &Resolved,
+    ) -> Result<&str, eval::Error> {
+        match self {
+            Self::String(s) => Ok(&s),
+            _ => Err(eval::Error::TypeError {
+                expected: Type::String,
+                found: self.type_of(resolved),
+            }),
+        }
+    }
 }
 
 impl DisplayWith for Value {

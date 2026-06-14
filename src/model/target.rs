@@ -17,16 +17,50 @@ pub enum Error {
     TargetFoundMultiple(String),
 }
 
-// pub enum TraceFun {
-//     Builtin (fn (&Record) -> )
-// }
+pub struct FastTrace {
+    last_modified: Option<u64>, // Unix time, if available
+    size: Option<u64>,          // In bytes, if available
+}
+
+pub struct Trace {
+    hash: u64,
+}
+
+pub enum TraceFun {
+    Builtin {
+        // Return of None means resource does not exist
+        fast: fn(
+            &record::Record,
+            &eval::Resolved,
+        ) -> Result<Option<FastTrace>, eval::Error>,
+        trace: fn(
+            &record::Record,
+            &eval::Resolved,
+        ) -> Result<Option<Trace>, eval::Error>,
+    },
+}
+
+impl Default for TraceFun {
+    fn default() -> Self {
+        TraceFun::Builtin {
+            fast: |_, _| Ok(None),
+            trace: |_, _| Ok(None),
+        }
+    }
+}
+
+impl std::fmt::Debug for TraceFun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<TraceFun>")
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct TargetType {
     // Schema that defines how we refer to targets of this type
     pub request_schema: RecordId,
     pub name_is: usize,
-    // pub gen_trace:
+    pub trace: TraceFun,
 }
 
 #[derive(Debug, Default)]
@@ -51,6 +85,7 @@ impl TargetTypes {
         request_name: &str,
         request_fields: Parameters,
         name_is: usize,
+        trace: TraceFun,
     ) -> Result<TargetTypeId, Error> {
         let req_id = records
             .register(interner, request_name, request_fields)
@@ -60,8 +95,8 @@ impl TargetTypes {
 
         self.0.push(TargetType {
             request_schema: req_id,
-
             name_is,
+            trace,
         });
         return Ok(TargetTypeId(self.0.len() - 1));
     }
@@ -80,6 +115,39 @@ impl TargetTypes {
     }
 }
 
+const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
+    fast: |rec, resolved| {
+        let path = rec.values[0].expect_string(resolved)?;
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None)
+            }
+            Err(e) => Err(e)?,
+        };
+
+        Ok(Some(FastTrace {
+            size: Some(meta.len()),
+            last_modified: Some(
+                meta.modified()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    // File creation time before UNIX EPOCH: return 0
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
+        }))
+    },
+    trace: |rec, resolved| {
+        let path = rec.values[0].expect_string(resolved)?;
+        let file = std::fs::File::open(path)?;
+        let hash = rapidhash::v3::rapidhash_v3_file_inline::<
+            &std::fs::File,
+            false,
+        >(&file, &rapidhash::v3::DEFAULT_RAPID_SECRETS)?;
+        Ok(Some(Trace { hash }))
+    },
+};
+
 pub fn register_target_type_file(
     interner: &mut Rodeo,
     records: &mut RecordSchemas,
@@ -89,7 +157,14 @@ pub fn register_target_type_file(
         .add_static("path", None)
         .build();
 
-    target_types.register(interner, records, "file", request_parameters, 0)
+    target_types.register(
+        interner,
+        records,
+        "file",
+        request_parameters,
+        0,
+        FILE_TRACE_FUN,
+    )
 }
 
 pub fn register_target_type_task(
@@ -105,7 +180,18 @@ pub fn register_target_type_task(
             span: None,
         },
     )]);
-    target_types.register(interner, records, "task", parameters, 0)
+    target_types.register(
+        interner,
+        records,
+        "task",
+        parameters,
+        0,
+        // Tasks don't have traces
+        TraceFun::Builtin {
+            fast: |_, _| Ok(None),
+            trace: |_, _| Ok(None),
+        },
+    )
 }
 
 #[derive(Debug, Default)]
@@ -121,7 +207,8 @@ pub struct Target {
 }
 
 impl Target {
-    pub fn run(
+    // Run the code
+    pub fn execute(
         &self,
         resolved: &eval::Resolved,
     ) -> Result<Value, error::Spanned<eval::Error>> {
@@ -140,6 +227,17 @@ impl Target {
             None => false,
             Some(n) => n == s,
         }
+    }
+
+    pub fn run(
+        &self,
+        resolved: &eval::Resolved,
+    ) -> Result<Value, error::Spanned<eval::Error>> {
+        // TODO: Check database for dependencies and query them
+        // TODO: Compare traces
+        self.run(resolved)
+        // TODO: Compare traces
+        // TODO: Cleanness
     }
 }
 

@@ -3,7 +3,7 @@ use lasso::RodeoResolver;
 
 use super::command;
 use super::parameters;
-pub use super::value::Value;
+pub use super::value::{Type, Value};
 use crate::error;
 use crate::error::WithSpan;
 use crate::model::target::TargetType;
@@ -20,6 +20,10 @@ pub enum Error {
     UninitVariable(String),
     #[error("Variable {0} declared twice in the same block")]
     DoubleDeclare(String),
+    #[error("Type error, expected {expected}, found {found}")]
+    TypeError { expected: Type, found: Type },
+    #[error("{0}")]
+    IOError(#[from] std::io::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -303,6 +307,14 @@ impl<'a> std::ops::Index<TargetTypeId> for Resolved {
 
     fn index(&self, index: TargetTypeId) -> &Self::Output {
         &self.target_types[index]
+    }
+}
+
+impl<'a> std::ops::Index<Ident> for Resolved {
+    type Output = str;
+
+    fn index(&self, index: Ident) -> &Self::Output {
+        &self.resolver.resolve(&index.0)
     }
 }
 
