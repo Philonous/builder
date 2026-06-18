@@ -236,6 +236,7 @@ impl Statement {
                 Ok(Value::Unit)
             }
             Statement::Need { target, as_ } => {
+                // TODO: register dependency
                 let value = target.eval(ctx)?;
                 let request =
                     value.expect_record(&ctx.resolved).without_span()?;
@@ -250,13 +251,14 @@ impl Statement {
                             ctx.resolved,
                             request.clone(),
                             target,
+                            as_.clone(),
                         )?;
                     }
                     None => {
+                        // No target matches requested resource
                         // TODO: register dependency and check existence
                     }
                 };
-                // TODO: handle "as"
                 Ok(Value::Unit)
             }
         }
@@ -345,7 +347,10 @@ impl<'a> EvalContext<'a> {
     }
 
     pub fn flush(&mut self) -> Result<(), Error> {
-        self.scheduler.flush(self.resolved)?;
+        let vars = self.scheduler.flush(self.resolved)?;
+        for (var, val) in vars {
+            self.init_var(&var, val)?;
+        }
         Ok(())
     }
 }
@@ -418,7 +423,7 @@ impl<'a> EvalContext<'a> {
             // Deferred variable, flush outstanding operations
             // (e.g. requested targets) and try again
             None => {
-                self.flush();
+                self.flush()?;
                 self.read_var_raw(var)?
                     .expect("flush did not fill deferred variable")
             }

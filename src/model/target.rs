@@ -340,11 +340,18 @@ struct TargetRequest {
     state: TargetState,
 }
 
+#[derive(Debug)]
+pub struct Outstanding {
+    target: TargetId,
+    request: record::Record,
+    result_as: Option<eval::Var>,
+}
+
 #[derive(Debug, Default)]
 // single-threaded scheduler
 pub struct Scheduler {
     requested: HashMap<record::Record, TargetState>,
-    outstanding: Vec<(TargetId, record::Record)>,
+    outstanding: Vec<Outstanding>,
 }
 
 impl Scheduler {
@@ -358,13 +365,18 @@ impl Scheduler {
         request: record::Record,
         // Resolved target
         target: TargetId,
+        result_as: Option<eval::Var>,
     ) -> Result<(), Spanned<eval::Error>> {
         let old = self.requested.get(&request);
         match old {
             None => {
                 self.requested
                     .insert(request.clone(), TargetState::Requested);
-                self.outstanding.push((target, request));
+                self.outstanding.push(Outstanding {
+                    target,
+                    request,
+                    result_as,
+                });
                 Ok(())
             }
             // Target was already built
@@ -384,22 +396,29 @@ impl Scheduler {
     pub fn flush(
         &mut self,
         resolved: &eval::Resolved,
-    ) -> Result<(), eval::Error> {
+    ) -> Result<Vec<(eval::Var, Value)>, eval::Error> {
         let items = std::mem::take(&mut self.outstanding);
-        for (target, request) in items {
-            match resolved[target].run(resolved, self) {
+        let mut results = Vec::new();
+        for outstanding in items {
+            match resolved[outstanding.target].run(resolved, self) {
                 Ok(v) => {
-                    *self.requested.get_mut(&request).expect("flush") =
-                        TargetState::Done(v)
-                    // TODO: update variables in evaluation context
+                    *self
+                        .requested
+                        .get_mut(&outstanding.request)
+                        // add() has added the item to requested as well
+                        .expect("flush") = TargetState::Done(v.clone());
+                    outstanding.result_as.map(|var| results.push((var, v)));
                 }
                 Err(_) => {
-                    *self.requested.get_mut(&request).expect("flush") =
-                        TargetState::Error;
+                    *self
+                        .requested
+                        .get_mut(&outstanding.request)
+                        // add() has added the item to requested as well
+                        .expect("flush") = TargetState::Error;
                     return Err(eval::Error::DependencyError);
                 }
             }
         }
-        Ok(())
+        Ok(results)
     }
 }
