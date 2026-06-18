@@ -1,0 +1,11 @@
+target task("2") {
+  print("Running 2")
+}
+
+
+target task("1") {
+  print("Running 1");
+  need(task("2"));
+  print_debug("Outstanding: #2");
+  print("Finishing 1")
+}

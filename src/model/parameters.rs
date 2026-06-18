@@ -1,6 +1,6 @@
 //! Handling of parameters and arguments
 use crate::error::{self, AddErrors, Errors, Span, Spanned, WithSpan};
-use std::collections::HashSet;
+use std::{cmp::Ordering, collections::HashSet};
 use thiserror;
 
 use super::value::{Ident, Value};
@@ -60,13 +60,30 @@ pub enum Pattern {
     Wildcard,
 }
 
-impl<'a> Pattern {
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+// We want this only for the implciit Ord instance
+struct Specificity(u8);
+
+impl Pattern {
     pub fn matches(&self, v: &Value) -> bool {
         match self {
             Pattern::Bind(_) => true,
             Pattern::Literal(l) => l == v,
             Pattern::Wildcard => true,
         }
+    }
+
+    fn specificity(&self) -> Specificity {
+        Specificity(match self {
+            Self::Literal(_) => 2,
+            // Bind and wildcard don't constraint, so they are lowest
+            Self::Bind(_) => 1,
+            Self::Wildcard => 1,
+        })
+    }
+
+    pub fn cmp_specificity(&self, other: &Self) -> Ordering {
+        self.specificity().cmp(&other.specificity())
     }
 }
 
@@ -82,6 +99,21 @@ impl<'a> Patterns {
             .iter()
             .zip(vals.iter())
             .all(|(pat, val)| pat.matches(val))
+    }
+
+    pub fn cmp_specificity(&self, other: &Self) -> Option<Ordering> {
+        // Length should be equal by construction
+        debug_assert_eq!(self.0.len(), other.0.len());
+        let mut res = Some(Ordering::Equal);
+        for (l, r) in self.0.iter().zip(other.0.iter()) {
+            res = match (res, l.cmp_specificity(r)) {
+                (Some(Ordering::Equal), c) => Some(c),
+                (c, Ordering::Equal) => c,
+                (c1, c2) if c1 == Some(c2) => c1,
+                _ => return None,
+            };
+        }
+        res
     }
 }
 

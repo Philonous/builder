@@ -1,4 +1,4 @@
-use std::{fs, sync::Arc};
+use std::{fs, io::ErrorKind, sync::Arc};
 
 use ariadne::Source;
 
@@ -76,15 +76,36 @@ fn resolve<'a>(src: &'a str, ast: parser::parser::Ast<'a>) -> Resolved {
     }
 }
 
+fn read_file(path: &PathBuf) -> String {
+    match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            eprintln!(
+                "Source file {} not found, consider passing --file or check that the file exists",
+                path.to_string_lossy()
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!(
+                "Error reading build file {}: {e}",
+                path.to_string_lossy()
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let Cli { file, command } = Cli::parse();
     let file = &file.unwrap_or(PathBuf::from("Buildfile"));
-    let src = Arc::new(fs::read_to_string(&file).expect("Failed to read file"));
+    let src = Arc::new(read_file(&file));
 
     match command {
         Command::Check => {
-            let _ = parse(&src);
-            println!("Source file={:?} checked", &file);
+            let ast = parse(&src);
+            let _ = resolve(&src, ast);
+            println!("Source file {:?} checked without errors", &file);
         }
         Command::Run { item } => {
             let ast = parse(&src);
@@ -96,7 +117,8 @@ fn main() {
                     std::process::exit(1)
                 }
             };
-            match target.run(&resolved) {
+            let mut scheduler = model::target::Scheduler::new();
+            match target.run(&resolved, &mut scheduler) {
                 Err(e) => {
                     eprintln!("{}", e);
                     std::process::exit(1)

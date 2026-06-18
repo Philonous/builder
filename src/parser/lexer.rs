@@ -48,7 +48,13 @@ pub enum NormalToken<'a> {
 
     // Keywords
     #[token("let")]
-    Let, // let
+    Let,
+
+    #[token("need")]
+    Need,
+
+    #[token("as")]
+    As,
 
     // Comment
     #[regex(r"#[^\n]*", logos::skip, allow_greedy = true)]
@@ -64,17 +70,19 @@ impl fmt::Display for NormalToken<'_> {
         match self {
             Self::Ident(s) => write!(f, "{s}"),
             Self::AtString(s) => write!(f, "@{s}"),
-            Self::ParenOpen => write!(f, "("),
-            Self::ParenClose => write!(f, ")"),
-            Self::BraceOpen => write!(f, "{{"),
-            Self::BraceClose => write!(f, "}}"),
-            Self::Semicolon => write!(f, ";"),
-            Self::Comma => write!(f, ","),
-            Self::Equals => write!(f, "="),
-            Self::Underscore => write!(f, "_"),
-            Self::StringStart => write!(f, r#"""#),
-            Self::CommandStart => write!(f, "`"),
+            Self::ParenOpen => write!(f, "open parenthesis"),
+            Self::ParenClose => write!(f, "closing parenthesis"),
+            Self::BraceOpen => write!(f, "open brace"),
+            Self::BraceClose => write!(f, "closing brace"),
+            Self::Semicolon => write!(f, "semicolon"),
+            Self::Comma => write!(f, "comma"),
+            Self::Equals => write!(f, "equals"),
+            Self::Underscore => write!(f, "underscore"),
+            Self::StringStart => write!(f, "quotation mark"),
+            Self::CommandStart => write!(f, "backtick"),
             Self::Let => write!(f, "let"),
+            Self::Need => write!(f, "need"),
+            Self::As => write!(f, "as"),
             Self::Comment => write!(f, "#"),
         }
     }

@@ -23,11 +23,11 @@ impl DisplayWith for Ident {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Type {
     Unit,
     String,
-    Record(String),
+    Record,
     Int,
 }
 
@@ -36,7 +36,7 @@ impl std::fmt::Display for Type {
         match self {
             Type::Unit => write!(f, "()"),
             Type::String => write!(f, "string"),
-            Type::Record(s) => write!(f, "record {}", s),
+            Type::Record => write!(f, "record"),
             Type::Int => write!(f, "int"),
         }
     }
@@ -52,13 +52,11 @@ pub enum Value {
 }
 
 impl Value {
-    pub fn type_of(&self, resolved: &Resolved) -> Type {
+    pub fn type_of(&self) -> Type {
         match self {
             Self::Unit => Type::Unit,
             Self::String(_) => Type::String,
-            Self::Record(record) => {
-                Type::Record(resolved[resolved[record.schema].name].to_owned())
-            }
+            Self::Record(_record) => Type::Record,
             Self::Int(_) => Type::Int,
         }
     }
@@ -71,7 +69,20 @@ impl Value {
             Self::String(s) => Ok(&s),
             _ => Err(eval::Error::TypeError {
                 expected: Type::String,
-                found: self.type_of(resolved),
+                found: self.type_of(),
+            }),
+        }
+    }
+
+    pub fn expect_record(
+        &self,
+        resolved: &Resolved,
+    ) -> Result<&Record, eval::Error> {
+        match self {
+            Self::Record(r) => Ok(&r),
+            _ => Err(eval::Error::TypeError {
+                expected: Type::Record,
+                found: self.type_of(),
             }),
         }
     }

@@ -134,9 +134,16 @@ pub enum ExprKind<'a> {
 pub struct Expr<'a>(pub Spanned<ExprKind<'a>>);
 
 #[derive(Clone, PartialEq, Debug)]
+pub struct NeedStatement<'a> {
+    pub arg: Expr<'a>,
+    pub as_: Option<Spanned<Ident<'a>>>,
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum Statement<'a> {
     Let(Spanned<Ident<'a>>, Expr<'a>),
     Expr(Expr<'a>),
+    Need(NeedStatement<'a>),
 }
 
 // Like Argument, but only allows literals, e.g. for constant contexts
@@ -362,6 +369,26 @@ impl<'tok> Expr<'tok> {
     }
 }
 
+impl<'tok> NeedStatement<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        just(normal!(Need))
+            .ignore_then(Expr::parse().delimited_by(
+                just(normal!(ParenOpen)),
+                just(normal!(ParenClose)),
+            ))
+            .then(
+                just(normal!(As))
+                    .ignore_then(Ident::parse().spanned())
+                    .or_not(),
+            )
+            .map(|(expr, as_)| NeedStatement { arg: expr, as_ })
+    }
+}
+
 impl<'tok> Statement<'tok> {
     fn parse<'src: 'tok, I>(
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
@@ -373,7 +400,10 @@ impl<'tok> Statement<'tok> {
             .then_ignore(just(normal!(Equals)))
             .then(Expr::parse())
             .map(|(ident, expr)| Statement::Let(ident, expr));
-        let_stmt.or(Expr::parse().map(Statement::Expr))
+
+        let_stmt
+            .or(NeedStatement::parse().map(Statement::Need))
+            .or(Expr::parse().map(Statement::Expr))
     }
 }
 

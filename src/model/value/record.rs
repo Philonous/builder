@@ -69,6 +69,12 @@ pub struct RecordPattern {
     pub patterns: Patterns,
 }
 
+impl RecordPattern {
+    pub fn matches(&self, record: &Record) -> bool {
+        self.schema == record.schema && self.patterns.matches(&record.values)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Record {
     pub schema: RecordId,

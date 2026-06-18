@@ -3,7 +3,7 @@ use lasso::{Interner, Resolver, Rodeo};
 use super::model::{eval, parameters, target};
 use super::parser::parser;
 use crate::error::{self, AddErrors, Errors, Spanned, WithSpan};
-use crate::model::eval::{Functions, Slots};
+use crate::model::eval::{Functions, SlotState, Slots};
 use crate::model::target::{TargetType, TargetTypeId, TargetTypes, Targets};
 use crate::model::value::{Ident, RecordPattern, RecordSchemas};
 use crate::parser::string::QuoteError;
@@ -57,7 +57,7 @@ impl Slots {
         // Create a new slot for the variable
         self.0.push(eval::Slot {
             name: name.clone(),
-            value: None,
+            value: SlotState::Uninitialised,
         });
 
         // Create variable referencing slot
@@ -436,32 +436,56 @@ impl<'a> parser::Block<'a> {
         let mut resolved: Vec<eval::Statement> =
             Vec::with_capacity(self.0.len());
         for statement in self.0 {
-            let stmt = match statement {
-                parser::Statement::Let(ident, expr) => {
-                    // let var = expr
-                    // Resolve expression first so it sees outer scope
-                    // Ordering matters here, we don't want the
-                    // expression to see the variable it initialises
-                    let expr =
-                        expr.resolve(ctx, &mut this).add_errors(&mut errors);
-                    // Now create variable in inner scope
-                    let name = ident.resolve(&mut ctx.interner);
-                    let var = this
-                        .new_variable(ctx, name)
-                        .with_span(ident.span)
-                        .add_errors(&mut errors);
-                    // Create resolved statement if both var and expr are `Some`
-                    var.zip(expr).map(|(var, expr)| eval::Statement::Let {
-                        var,
-                        span: ident.span.into(),
-                        expr,
-                    })
+            let stmt = (|| {
+                match statement {
+                    parser::Statement::Let(ident, expr) => {
+                        // let var = expr
+                        // Resolve expression first so it sees outer scope
+                        // Ordering matters here, we don't want the
+                        // expression to see the variable it initialises
+                        let expr = expr
+                            .resolve(ctx, &mut this)
+                            .add_errors(&mut errors)?;
+                        // Now create variable in inner scope
+                        let name = ident.resolve(&mut ctx.interner);
+                        let var = this
+                            .new_variable(ctx, name)
+                            .with_span(ident.span)
+                            .add_errors(&mut errors)?;
+                        // Create resolved statement if both var and expr are `Some`
+                        Some(eval::Statement::Let {
+                            var,
+                            span: ident.span.into(),
+                            expr,
+                        })
+                    }
+                    parser::Statement::Expr(expr) => {
+                        Some(eval::Statement::Expr(
+                            expr.resolve(ctx, &mut this)
+                                .add_errors(&mut errors)?,
+                        ))
+                    }
+                    parser::Statement::Need(need) => {
+                        let target = need
+                            .arg
+                            .resolve(ctx, &mut this)
+                            .add_errors(&mut errors)?;
+                        let var = match need.as_ {
+                            None => None,
+                            Some(ident) => {
+                                let name = ident.resolve(&mut ctx.interner);
+                                Some(
+                                    this.new_variable(ctx, name)
+                                        .with_span(ident.span)
+                                        .add_errors(&mut errors)?,
+                                )
+                            }
+                        };
+                        Some(eval::Statement::Need { target, as_: var })
+                        // eval::Statement
+                    }
                 }
-                parser::Statement::Expr(expr) => expr
-                    .resolve(ctx, &mut this)
-                    .add_errors(&mut errors)
-                    .map(eval::Statement::Expr),
-            };
+            })();
             // Add statement if it resolved, if any return an error,
             // we don't return the list at all, so we never return a
             // partia list
