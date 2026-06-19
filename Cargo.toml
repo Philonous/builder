@@ -13,9 +13,12 @@ futures = "0.3.32"
 lasso = "0.7.3"
 logos = "0.16.1"
 parking_lot = "0.12.5"
+rapidhash = { version = "4.4.1", features = ["std"] }
 regex = "1.12.3"
 thiserror = "2.0.18"
 tokio = "1.52.3"
+tracing = "0.1.44"
+tracing-subscriber = {version= "0.3.23", features = ["env-filter"]}
 
 [dev-dependencies]
 insta = { version= "1.47.2", features=["glob", "yaml"] }

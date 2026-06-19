@@ -10,6 +10,7 @@ use crate::model::target::{
     self, Target, TargetId, TargetType, TargetTypeId, TargetTypes, Targets,
 };
 use crate::model::value::display::{DisplayCtx, WithDisplayCtxExt};
+use crate::model::value::record;
 use crate::model::value::{Ident, Record, RecordSchema, RecordSchemas};
 
 #[derive(Debug, thiserror::Error)]
@@ -42,7 +43,7 @@ pub struct Var {
 
 #[derive(Clone)]
 pub enum FunBody {
-    Builtin(fn(&mut EvalContext, &[Value]) -> Result<Value, Error>),
+    Builtin(fn(&mut EvalContext, &[Deferrable]) -> Result<Value, Error>),
     // TODO: custom functions
 }
 
@@ -57,7 +58,7 @@ impl<'a> std::fmt::Debug for FunBody {
 impl FunBody {
     pub fn exec<'b>(
         &self,
-        args: &[Value],
+        args: &[Deferrable],
         ctx: &mut EvalContext<'b>,
     ) -> Result<Value, Error> {
         match self {
@@ -120,6 +121,10 @@ pub enum ExprKind {
         fun: FunId,
         args: Vec<Expr>,
     },
+    Need {
+        // Box so we can have a recursive Expr => ExprKind
+        request: Box<Expr>,
+    },
     Record {
         schema: RecordId,
         fields: Vec<Expr>,
@@ -148,14 +153,43 @@ impl<'a> From<Value> for Expr {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum Deferrable {
+    Deferred(record::Record),
+    Immediate(Value),
+}
+
+impl From<Value> for Deferrable {
+    fn from(value: Value) -> Self {
+        Self::Immediate(value)
+    }
+}
+
+impl Deferrable {
+    pub fn force(&self, ctx: &mut EvalContext) -> Result<Value, Error> {
+        Ok(match self {
+            Deferrable::Deferred(record) => {
+                ctx.flush()?;
+                ctx.scheduler
+                    .find_result(&record)?
+                    .expect("deferrable not resolved after flush")
+                    .clone()
+            }
+            Deferrable::Immediate(value) => value.clone(),
+        })
+    }
+}
+
 impl Expr {
     fn eval(
         &self,
         ctx: &mut EvalContext,
-    ) -> Result<Value, error::Spanned<Error>> {
+    ) -> Result<Deferrable, error::Spanned<Error>> {
         Ok(match &self.kind {
-            ExprKind::Lit(val) => val.clone(),
-            ExprKind::Var(var) => ctx.read_var(var).with_opt_span(self.span)?,
+            ExprKind::Lit(val) => val.clone().into(),
+            ExprKind::Var(var) => {
+                ctx.read_var(var).with_opt_span(self.span)?.into()
+            }
             ExprKind::Command { executable, args } => {
                 // Commands can see effects of targets, so we need to flush
                 ctx.flush().without_span()?;
@@ -164,80 +198,29 @@ impl Expr {
                     args: args.clone(),
                 };
                 cmd.exe().with_span_from(self.span)?;
-                Value::Unit
+                Value::Unit.into()
             }
             ExprKind::FunApp { fun, args } => {
                 let fun = &ctx.resolved[*fun];
                 // Functions with observable effects need outstanding
                 // targets to be flushed before they can run
                 if fun.barrier {
-                    ctx.flush();
+                    ctx.flush().with_opt_span(self.span)?;
                 }
                 let mut args_acc = Vec::with_capacity(args.len());
                 for expr in args.iter() {
                     args_acc.push(expr.eval(ctx)?);
                 }
 
-                fun.body.exec(&args_acc, ctx).with_opt_span(self.span)?
+                fun.body
+                    .exec(&args_acc, ctx)
+                    .with_opt_span(self.span)?
+                    .into()
             }
-            ExprKind::Record { schema, fields } => {
-                let mut values = Vec::with_capacity(fields.len());
-                for expr in fields.iter() {
-                    values.push(expr.eval(ctx)?);
-                }
-                Value::Record(Record {
-                    schema: *schema,
-                    values,
-                })
-            }
-            ExprKind::Unit => Value::Unit,
-            ExprKind::String(parts) => {
-                let mut s = String::new();
-                for part in parts {
-                    match part {
-                        StringPart::Splice { var, span } => s.push_str(
-                            &ctx.read_var(var)
-                                .with_span(*span)?
-                                .to_string_with(ctx.resolved),
-                        ),
-                        StringPart::Lit(cow) => s.push_str(cow),
-                    }
-                }
-                Value::String(s)
-            }
-        })
-    }
-}
-
-#[derive(Debug)]
-pub enum Statement {
-    Expr(Expr),
-    Let {
-        var: Var,
-        expr: Expr,
-        span: error::Span,
-    },
-    Need {
-        target: Expr,
-        as_: Option<Var>,
-    },
-}
-
-impl Statement {
-    fn run<'a>(
-        &self,
-        ctx: &mut EvalContext<'a>,
-    ) -> Result<Value, error::Spanned<Error>> {
-        match self {
-            Statement::Expr(v) => v.eval(ctx),
-            Statement::Let { var, expr, span } => {
-                let v = expr.eval(ctx)?;
-                ctx.init_var(var, v).with_span(*span)?;
-                Ok(Value::Unit)
-            }
-            Statement::Need { target, as_ } => {
+            ExprKind::Need { request } => {
                 // TODO: register dependency
-                let value = target.eval(ctx)?;
+                let value =
+                    request.eval(ctx)?.force(ctx).with_opt_span(self.span)?;
                 let request =
                     value.expect_record(&ctx.resolved).without_span()?;
                 let target = match ctx
@@ -251,7 +234,6 @@ impl Statement {
                             ctx.resolved,
                             request.clone(),
                             target,
-                            as_.clone(),
                         )?;
                     }
                     None => {
@@ -259,7 +241,64 @@ impl Statement {
                         // TODO: register dependency and check existence
                     }
                 };
-                Ok(Value::Unit)
+                Deferrable::Deferred(request.clone())
+            }
+            ExprKind::Record { schema, fields } => {
+                let mut values = Vec::with_capacity(fields.len());
+                for expr in fields.iter() {
+                    // Constructing a record requires concrete values,
+                    // we we have t resolve all potentially deferred
+                    // values
+                    values.push(expr.eval(ctx)?.force(ctx).without_span()?);
+                }
+                Value::Record(Record {
+                    schema: *schema,
+                    values,
+                })
+                .into()
+            }
+            ExprKind::Unit => Value::Unit.into(),
+            ExprKind::String(parts) => {
+                let mut s = String::new();
+                for part in parts {
+                    match part {
+                        StringPart::Splice { var, span } => s.push_str(
+                            &ctx.read_var(var)
+                                .with_span(*span)?
+                                .force(ctx)
+                                .with_span(*span)?
+                                .to_string_with(ctx.resolved),
+                        ),
+                        StringPart::Lit(cow) => s.push_str(cow),
+                    }
+                }
+                Value::String(s).into()
+            }
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum Statement {
+    Expr(Expr),
+    Let {
+        var: Var,
+        expr: Expr,
+        span: error::Span,
+    },
+}
+
+impl Statement {
+    fn run<'a>(
+        &self,
+        ctx: &mut EvalContext<'a>,
+    ) -> Result<Deferrable, error::Spanned<Error>> {
+        match self {
+            Statement::Expr(v) => v.eval(ctx),
+            Statement::Let { var, expr, span } => {
+                let v = expr.eval(ctx)?;
+                ctx.init_var(var, v).with_span(*span)?;
+                Ok(Value::Unit.into())
             }
         }
     }
@@ -272,8 +311,7 @@ pub enum SlotState {
     Uninitialised,
     /// Needs to be filled in by flushing outstanding deferred
     /// operations, e.g. registered targets
-    Deferred,
-    Value(Value),
+    Value(Deferrable),
 }
 
 // Variable Slot
@@ -296,12 +334,12 @@ impl<'a> Block {
     pub fn run(
         &self,
         ctx: &mut EvalContext<'a>,
-    ) -> Result<Value, error::Spanned<Error>> {
+    ) -> Result<Deferrable, error::Spanned<Error>> {
         // Create new stack frame
 
         let mut this = ctx.enter(self.slots.clone());
 
-        let mut result = Value::Unit;
+        let mut result = Value::Unit.into();
         for statement in &self.statements {
             result = statement.run(&mut this)?;
         }
@@ -347,11 +385,7 @@ impl<'a> EvalContext<'a> {
     }
 
     pub fn flush(&mut self) -> Result<(), Error> {
-        let vars = self.scheduler.flush(self.resolved)?;
-        for (var, val) in vars {
-            self.init_var(&var, val)?;
-        }
-        Ok(())
+        self.scheduler.flush(self.resolved)
     }
 }
 
@@ -402,22 +436,27 @@ impl<'a> Drop for EvalContext<'a> {
 }
 
 impl<'a> EvalContext<'a> {
-    fn read_var_raw(&mut self, var: &Var) -> Result<Option<Value>, Error> {
+    fn read_var_raw(&mut self, var: &Var) -> Result<Option<Deferrable>, Error> {
         // The innermost scope is the *last* one
         let ix = &self.variables.len() - var.nesting - 1;
         let slot = &(&self.variables[ix].0)[var.slot];
         match &slot.value {
             // The analyser should not allow this to happen,
             // presuambly this should be a panic instead. TODO: check
-            SlotState::Uninitialised => Err(Error::UninitVariable(
-                self.resolved.resolver.resolve(&slot.name.0).to_owned(),
-            )),
-            SlotState::Deferred => Ok(None),
-            SlotState::Value(v) => Ok(Some(v.clone())),
+            SlotState::Uninitialised => {
+                tracing::error!("Uninitialised variable {:?}", var);
+                Err(Error::UninitVariable(
+                    self.resolved.resolver.resolve(&slot.name.0).to_owned(),
+                ))
+            }
+            SlotState::Value(v) => {
+                tracing::trace!("Read variable {:?}, got: {:?}", var, v);
+                Ok(Some(v.clone()))
+            }
         }
     }
 
-    fn read_var(&mut self, var: &Var) -> Result<Value, Error> {
+    fn read_var(&mut self, var: &Var) -> Result<Deferrable, Error> {
         Ok(match self.read_var_raw(var)? {
             Some(v) => v,
             // Deferred variable, flush outstanding operations
@@ -430,7 +469,7 @@ impl<'a> EvalContext<'a> {
         })
     }
 
-    fn init_var(&mut self, var: &Var, val: Value) -> Result<(), Error> {
+    fn init_var(&mut self, var: &Var, val: Deferrable) -> Result<(), Error> {
         // The innermost scope is the *last* one
         let ix = self.variables.len() - var.nesting - 1;
 
@@ -450,7 +489,7 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn assign_var(&mut self, var: &Var, val: Value) -> Result<(), Error> {
+    fn assign_var(&mut self, var: &Var, val: Deferrable) -> Result<(), Error> {
         // The innermost scope is the *last* one
         let ix = &self.variables.len() - var.nesting - 1;
         let slot = &mut (&mut self.variables[ix].0)[var.slot];
@@ -489,7 +528,7 @@ pub fn builtin_fun_print(interner: &mut Rodeo) -> Fun {
         barrier: true,
         body: FunBody::Builtin(|ctx, args| match args {
             [v] => {
-                println!("{}", v.with_ctx(ctx.resolved));
+                println!("{}", v.force(ctx)?.with_ctx(ctx.resolved));
                 Ok(Value::Unit)
             }
             // Analyser has checked that number of arguments is correct,
@@ -500,7 +539,7 @@ pub fn builtin_fun_print(interner: &mut Rodeo) -> Fun {
 }
 
 // Debug printing that isnt a barrier, so it gets executed without
-// flushing autstanding dependencies
+// flushing outstanding dependencies
 pub fn builtin_fun_print_debug(interner: &mut Rodeo) -> Fun {
     let print = interner.get_or_intern("print_debug");
     let str = interner.get_or_intern("str");
@@ -513,12 +552,24 @@ pub fn builtin_fun_print_debug(interner: &mut Rodeo) -> Fun {
                 span: None,
             },
         )]),
-        // Print is observable, so we need to flush effects before we
-        // can run it
+
+        // print
         barrier: false,
         body: FunBody::Builtin(|ctx, args| match args {
             [v] => {
-                println!("{}", v.with_ctx(ctx.resolved));
+                // We *dont* force values here so we can see "under the hood"
+                match v {
+                    Deferrable::Deferred(record) => {
+                        println!(
+                            "<deferred: {}>",
+                            record.with_ctx(ctx.resolved)
+                        );
+                    }
+                    Deferrable::Immediate(v) => {
+                        println!("{}", v.with_ctx(ctx.resolved));
+                    }
+                }
+
                 Ok(Value::Unit)
             }
             // Analyser has checked that number of arguments is correct,

@@ -53,9 +53,6 @@ pub enum NormalToken<'a> {
     #[token("need")]
     Need,
 
-    #[token("as")]
-    As,
-
     // Comment
     #[regex(r"#[^\n]*", logos::skip, allow_greedy = true)]
     Comment,
@@ -82,7 +79,6 @@ impl fmt::Display for NormalToken<'_> {
             Self::CommandStart => write!(f, "backtick"),
             Self::Let => write!(f, "let"),
             Self::Need => write!(f, "need"),
-            Self::As => write!(f, "as"),
             Self::Comment => write!(f, "#"),
         }
     }

@@ -1,6 +1,6 @@
 target task("3") {
   print("Running 3");
-  "value: 3"
+  "value=3"
 }
 
 
@@ -9,11 +9,20 @@ target task("2") {
 }
 
 
+target file(path) {
+  print("Building file");
+  print("Path: {path}");
+  print("after print")
+}
+
+
 target task("1") {
   print("Running 1");
   need(task("2"));
   print_debug("Outstanding: #2");
-  need(task("3")) as var;
+  let var = need(task("3"));
+  print("Running file task");
+  need(file(path="test"));
   print("var3: {var}");
   print("Finishing 1")
 

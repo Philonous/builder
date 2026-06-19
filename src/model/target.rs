@@ -10,6 +10,7 @@ use crate::error::{self, Spanned, WithSpan};
 use crate::model::eval::RecordId;
 use crate::model::value::WithDisplayCtxExt;
 use lasso::Rodeo;
+use tracing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -205,8 +206,11 @@ pub struct Target {
     pub name: Option<String>,
     // Determine if requested resource can be built by this target
     pub pattern: RecordPattern,
-    // Resolved variable slots for running the block
+    // Resolved variable slots for target parameters
     pub slots: eval::Slots,
+    // How to match request arguments to target parameter slots
+    // If the ith entry is k, then put the kth value into slot i
+    pub matchers: Vec<usize>,
     pub block: eval::Block,
 }
 
@@ -216,6 +220,7 @@ impl Target {
         &self,
         resolved: &eval::Resolved,
         scheduler: &mut Scheduler,
+        request: &record::Record,
     ) -> Result<Value, error::Spanned<eval::Error>> {
         let mut variables = Default::default();
         let mut ctx = eval::EvalContext {
@@ -223,8 +228,21 @@ impl Target {
             resolved,
             scheduler,
         };
-        // let mut ctx = ctx.enter(eval::Slots(Vec::new()));
-        self.block.run(&mut ctx.enter(eval::Slots(Vec::new())))
+        let mut slots = self.slots.clone();
+        for (to, from) in self.matchers.iter().enumerate() {
+            slots.0[to].value = eval::SlotState::Value(
+                eval::Deferrable::Immediate(request.values[*from].clone()),
+            );
+        }
+        // Fill in variables with record elements
+        let mut scope = ctx.enter(slots);
+        // tracing::trace!("Starting build");
+        let res = self
+            .block
+            .run(&mut scope)?
+            .force(&mut scope)
+            .without_span()?;
+        Ok(res)
     }
 
     // Try to match the target to a single string (e.g. cli)
@@ -239,13 +257,43 @@ impl Target {
         &self,
         resolved: &eval::Resolved,
         scheduler: &mut Scheduler,
+        request: &record::Record,
     ) -> Result<Value, error::Spanned<eval::Error>> {
+        let tgt = request.with_ctx(resolved).to_string();
+        eprintln!("Executing target {}", tgt);
+        tracing::error_span!("target", target = tgt);
         // TODO: Check database for dependencies and query them
         // TODO: Compare traces
-        let v = self.execute(resolved, scheduler);
-        // The block might not have forced all dependencies, so we flush them now
+        let v = match self.execute(resolved, scheduler, request) {
+            Ok(v) => {
+                match v {
+                    Value::Unit => {
+                        eprintln!("Target {} finished", tgt);
+                    }
+                    _ => {
+                        eprintln!(
+                            "Target {} finished, return value: {}",
+                            tgt,
+                            v.with_ctx(resolved)
+                        );
+                    }
+                }
+
+                v
+            }
+            Err(e) => {
+                // TODO: Make use of span
+                eprintln!(
+                    "Target {} failed: {}",
+                    request.with_ctx(resolved),
+                    e.inner
+                );
+                return Err(e);
+            }
+        };
+        // Execute should have flushed by forcing the return value, but no harm in doing it explicitly
         scheduler.flush(resolved).without_span()?;
-        v
+        Ok(v)
         // TODO: Compare traces
         // TODO: Cleanness
     }
@@ -344,7 +392,6 @@ struct TargetRequest {
 pub struct Outstanding {
     target: TargetId,
     request: record::Record,
-    result_as: Option<eval::Var>,
 }
 
 #[derive(Debug, Default)]
@@ -365,18 +412,13 @@ impl Scheduler {
         request: record::Record,
         // Resolved target
         target: TargetId,
-        result_as: Option<eval::Var>,
     ) -> Result<(), Spanned<eval::Error>> {
         let old = self.requested.get(&request);
         match old {
             None => {
                 self.requested
                     .insert(request.clone(), TargetState::Requested);
-                self.outstanding.push(Outstanding {
-                    target,
-                    request,
-                    result_as,
-                });
+                self.outstanding.push(Outstanding { target, request });
                 Ok(())
             }
             // Target was already built
@@ -393,32 +435,73 @@ impl Scheduler {
         }
     }
 
+    pub fn find_result(
+        &self,
+        request: &record::Record,
+    ) -> Result<Option<&Value>, eval::Error> {
+        match self
+            .requested
+            .get(request)
+            .expect("find_result on resource that has not be scheduled")
+        {
+            TargetState::Done(v) => Ok(Some(v)),
+            TargetState::Error => Err(eval::Error::DependencyError),
+            TargetState::Requested | TargetState::Running => Ok(None),
+        }
+    }
+
+    // Force a single requested target
+    pub fn force(
+        &self,
+        request: &record::Record,
+    ) -> Result<&Value, eval::Error> {
+        // Check if value is already present
+        match self.find_result(request)? {
+            Some(v) => return Ok(v),
+            None => (),
+        };
+        // Value still deferred, run target now
+
+        todo!()
+    }
+
+    fn run_one(
+        &mut self,
+        resolved: &eval::Resolved,
+        outstanding: Outstanding,
+    ) -> Result<(), eval::Error> {
+        match resolved[outstanding.target].run(
+            resolved,
+            self,
+            &outstanding.request,
+        ) {
+            Ok(v) => {
+                *self
+                    .requested
+                    .get_mut(&outstanding.request)
+                    // add() has added the item to requested as well
+                    .expect("flush") = TargetState::Done(v.clone());
+                Ok(())
+            }
+            Err(_) => {
+                *self
+                    .requested
+                    .get_mut(&outstanding.request)
+                    // add() has added the item to requested as well
+                    .expect("flush") = TargetState::Error;
+                Err(eval::Error::DependencyError)
+            }
+        }
+    }
+
     pub fn flush(
         &mut self,
         resolved: &eval::Resolved,
-    ) -> Result<Vec<(eval::Var, Value)>, eval::Error> {
+    ) -> Result<(), eval::Error> {
         let items = std::mem::take(&mut self.outstanding);
-        let mut results = Vec::new();
         for outstanding in items {
-            match resolved[outstanding.target].run(resolved, self) {
-                Ok(v) => {
-                    *self
-                        .requested
-                        .get_mut(&outstanding.request)
-                        // add() has added the item to requested as well
-                        .expect("flush") = TargetState::Done(v.clone());
-                    outstanding.result_as.map(|var| results.push((var, v)));
-                }
-                Err(_) => {
-                    *self
-                        .requested
-                        .get_mut(&outstanding.request)
-                        // add() has added the item to requested as well
-                        .expect("flush") = TargetState::Error;
-                    return Err(eval::Error::DependencyError);
-                }
-            }
+            self.run_one(resolved, outstanding)?;
         }
-        Ok(results)
+        Ok(())
     }
 }

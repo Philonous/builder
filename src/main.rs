@@ -12,6 +12,7 @@ mod process;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use tracing_subscriber::EnvFilter;
 
 use crate::model::{eval::Resolved, value::WithDisplayCtxExt};
 
@@ -21,6 +22,12 @@ struct Cli {
     /// Optional input file; valid before or after the command.
     #[arg(short, long, global = true, value_name = "PATH")]
     file: Option<PathBuf>,
+
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
+
+    #[arg(short, long, global = true)]
+    quiet: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -46,6 +53,21 @@ enum Command {
     },
     /// Run one or more items (the default command).
     Targets,
+}
+
+impl Cli {
+    fn log_level(&self) -> tracing::Level {
+        if self.quiet {
+            tracing::Level::ERROR
+        } else {
+            match self.verbose {
+                0 => tracing::Level::WARN,
+                1 => tracing::Level::INFO,
+                2 => tracing::Level::DEBUG,
+                _ => tracing::Level::TRACE,
+            }
+        }
+    }
 }
 
 fn parse(src: &str) -> parser::parser::Ast<'_> {
@@ -97,11 +119,20 @@ fn read_file(path: &PathBuf) -> String {
 }
 
 fn main() {
-    let Cli { file, command } = Cli::parse();
-    let file = &file.unwrap_or(PathBuf::from("Buildfile"));
+    let cli = Cli::parse();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(cli.log_level().into())
+                .from_env_lossy(),
+        ) // RUST_LOG=builder=debug
+        .with_target(false)
+        .init();
+
+    let file = &cli.file.unwrap_or(PathBuf::from("Buildfile"));
     let src = Arc::new(read_file(&file));
 
-    match command {
+    match cli.command {
         Command::Check => {
             let ast = parse(&src);
             let _ = resolve(&src, ast);
@@ -118,14 +149,16 @@ fn main() {
                 }
             };
             let mut scheduler = model::target::Scheduler::new();
-            match target.run(&resolved, &mut scheduler) {
+            match target.run(&resolved, &mut scheduler, &Default::default()) {
                 Err(e) => {
-                    eprintln!("{}", e);
+                    eprintln!("Build failed:: {}", e);
                     std::process::exit(1)
                 }
                 Ok(val) => match val {
                     model::eval::Value::Unit => (),
-                    _ => println!("{}", val.with_ctx(&resolved)),
+                    _ => {
+                        println!("Build finished: {}", val.with_ctx(&resolved))
+                    }
                 },
             }
         }

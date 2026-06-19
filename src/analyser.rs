@@ -14,7 +14,7 @@ use std::ops::Deref;
 pub enum Error {
     #[error("variable {0} was already declared")]
     DuplicateVariable(String),
-    #[error("variable {0} used before being declared")]
+    #[error("variable {0} not declared")]
     UndefinedVariable(String),
     #[error("{0}")]
     QuoteError(#[from] QuoteError),
@@ -285,6 +285,16 @@ impl<'a> parser::Expr<'a> {
                 }
                 eval::ExprKind::String(parts)
             }
+            parser::ExprKind::Need(parser::NeedExpr(request)) => {
+                eval::ExprKind::Need {
+                    request: Box::new(
+                        request
+                            .resolve(ctx, scopes)
+                            .add_errors(&mut errors)
+                            .unwrap_or_default(),
+                    ),
+                }
+            }
         };
         errors.ok(eval::Expr {
             kind,
@@ -386,6 +396,9 @@ impl<'a> parser::Patterns<'a> {
                         parser::PatternKind::Bind(_) => unreachable!(
                             "bare variable pattern already handled"
                         ),
+                        parser::PatternKind::Wildcard => {
+                            parameters::Pattern::Wildcard
+                        }
                     };
 
                     positional.push(Spanned::spanned(res, arg.span));
@@ -406,6 +419,9 @@ impl<'a> parser::Patterns<'a> {
                             parameters::Pattern::Bind(
                                 var.resolve(&mut ctx.interner),
                             )
+                        }
+                        parser::PatternKind::Wildcard => {
+                            parameters::Pattern::Wildcard
                         }
                     };
                     key_value.push(Spanned::spanned(
@@ -465,25 +481,6 @@ impl<'a> parser::Block<'a> {
                                 .add_errors(&mut errors)?,
                         ))
                     }
-                    parser::Statement::Need(need) => {
-                        let target = need
-                            .arg
-                            .resolve(ctx, &mut this)
-                            .add_errors(&mut errors)?;
-                        let var = match need.as_ {
-                            None => None,
-                            Some(ident) => {
-                                let name = ident.resolve(&mut ctx.interner);
-                                Some(
-                                    this.new_variable(ctx, name)
-                                        .with_span(ident.span)
-                                        .add_errors(&mut errors)?,
-                                )
-                            }
-                        };
-                        Some(eval::Statement::Need { target, as_: var })
-                        // eval::Statement
-                    }
                 }
             })();
             // Add statement if it resolved, if any return an error,
@@ -514,7 +511,8 @@ impl<'a> parser::Decl<'a> {
         let mut this_scope = outer.enter();
         let mut errors: Errors<Error> = Errors::empty();
 
-        // Resolve target patterns
+        // Find the "name" field that determines if the target is
+        // displayed in the CLI
         let name = match &parameters.0[kind.name_is] {
             parameters::Pattern::Literal(eval::Value::String(s)) => {
                 Some(s.clone())
@@ -522,16 +520,19 @@ impl<'a> parser::Decl<'a> {
             _ => None,
         };
 
-        // Add Arguments to the current scope
-        // (As defined by the target type)
-        // Maybe we should add a namespace prefix, like "target:"
-        for (name, param) in
-            ctx.records[kind.request_schema].fields.0.deref().iter()
-        {
-            this_scope
-                .new_variable(ctx, *name)
-                .with_opt_span(param.span)
-                .add_errors(&mut errors);
+        let mut matchers = Vec::new();
+        for (ix, pat) in parameters.0.iter().enumerate() {
+            match pat {
+                parameters::Pattern::Literal { .. }
+                | parameters::Pattern::Wildcard => (),
+                parameters::Pattern::Bind(name) => {
+                    this_scope
+                        .new_variable(ctx, *name)
+                        .without_span()
+                        .add_errors(&mut errors);
+                    matchers.push(ix);
+                }
+            }
         }
 
         // Resolve the command block
@@ -552,6 +553,7 @@ impl<'a> parser::Decl<'a> {
             pattern,
             block,
             slots,
+            matchers,
         };
 
         errors.ok(target)

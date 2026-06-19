@@ -107,7 +107,7 @@ impl<'tok> Arguments<'tok> {
             .spanned()
             .separated_by(just(normal!(Comma)))
             .collect()
-            .delimited_by(just(normal!(ParenOpen)), just(normal!(ParenClose)))
+            .parenthesized()
             .map(Arguments)
     }
 }
@@ -122,28 +122,25 @@ pub enum StringExprPart<'a> {
 pub struct StringExpr<'a>(pub Vec<StringExprPart<'a>>);
 
 #[derive(Clone, PartialEq, Debug)]
+pub struct NeedExpr<'a>(pub Box<Expr<'a>>);
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum ExprKind<'a> {
     Lit(Lit<'a>),
     String(StringExpr<'a>),
     Ident(Ident<'a>),
     Command(Command<MaybeQuoted<'a>>),
     FunApp(Ident<'a>, Spanned<Arguments<'a>>),
+    Need(NeedExpr<'a>),
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Expr<'a>(pub Spanned<ExprKind<'a>>);
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct NeedStatement<'a> {
-    pub arg: Expr<'a>,
-    pub as_: Option<Spanned<Ident<'a>>>,
-}
-
-#[derive(Clone, PartialEq, Debug)]
 pub enum Statement<'a> {
     Let(Spanned<Ident<'a>>, Expr<'a>),
     Expr(Expr<'a>),
-    Need(NeedStatement<'a>),
 }
 
 // Like Argument, but only allows literals, e.g. for constant contexts
@@ -180,7 +177,7 @@ impl<'tok> LitArguments<'tok> {
             .spanned()
             .separated_by(just(normal!(Comma)))
             .collect()
-            .delimited_by(just(normal!(ParenOpen)), just(normal!(ParenClose)))
+            .parenthesized()
             .map(LitArguments)
     }
 }
@@ -189,6 +186,7 @@ impl<'tok> LitArguments<'tok> {
 pub enum PatternKind<'a> {
     Lit(Lit<'a>),
     Bind(Ident<'a>),
+    Wildcard,
 }
 
 impl<'a> std::fmt::Display for PatternKind<'a> {
@@ -199,6 +197,9 @@ impl<'a> std::fmt::Display for PatternKind<'a> {
             }
             Self::Bind(var) => {
                 write!(f, "{}", var)
+            }
+            Self::Wildcard => {
+                write!(f, "_")
             }
         }
     }
@@ -212,7 +213,8 @@ impl<'tok> PatternKind<'tok> {
     {
         let bind = Ident::parse().map(Self::Bind);
         let lit = Lit::parse().map(Self::Lit);
-        bind.or(lit)
+        let wildcard = just(normal!(Underscore)).map(|_| PatternKind::Wildcard);
+        bind.or(lit).or(wildcard)
     }
 }
 
@@ -252,7 +254,7 @@ impl<'tok> Patterns<'tok> {
             .spanned()
             .separated_by(just(normal!(Comma)))
             .collect()
-            .delimited_by(just(normal!(ParenOpen)), just(normal!(ParenClose)))
+            .parenthesized()
             .map(Patterns)
     }
 }
@@ -345,6 +347,21 @@ impl<'tok> StringExpr<'tok> {
     }
 }
 
+impl<'tok> NeedExpr<'tok> {
+    fn parse<'src: 'tok, I, E>(
+        expr: E,
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>>
+            + Clone,
+    {
+        just(normal!(Need))
+            .ignore_then(expr.parenthesized())
+            .map(|exp| NeedExpr(Box::new(exp)))
+    }
+}
+
 impl<'tok> Expr<'tok> {
     fn parse<'src: 'tok, I>(
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
@@ -352,13 +369,14 @@ impl<'tok> Expr<'tok> {
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
         recursive(|expr| {
-            let arg_list = Arguments::parse(expr);
+            let arg_list = Arguments::parse(expr.clone());
             let fun_app = Ident::parse()
                 .then(arg_list.spanned())
                 .map(|(ident, params)| ExprKind::FunApp(ident, params));
             Command::parse()
                 .map(ExprKind::Command)
                 .or(fun_app)
+                .or(NeedExpr::parse(expr.clone()).map(ExprKind::Need))
                 .or(Lit::parse().map(ExprKind::Lit))
                 .or(Ident::parse().map(ExprKind::Ident))
                 // This has to come after Lit because they overlap
@@ -366,26 +384,6 @@ impl<'tok> Expr<'tok> {
                 .spanned()
                 .map(Expr)
         })
-    }
-}
-
-impl<'tok> NeedStatement<'tok> {
-    fn parse<'src: 'tok, I>(
-    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
-    where
-        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
-    {
-        just(normal!(Need))
-            .ignore_then(Expr::parse().delimited_by(
-                just(normal!(ParenOpen)),
-                just(normal!(ParenClose)),
-            ))
-            .then(
-                just(normal!(As))
-                    .ignore_then(Ident::parse().spanned())
-                    .or_not(),
-            )
-            .map(|(expr, as_)| NeedStatement { arg: expr, as_ })
     }
 }
 
@@ -401,9 +399,7 @@ impl<'tok> Statement<'tok> {
             .then(Expr::parse())
             .map(|(ident, expr)| Statement::Let(ident, expr));
 
-        let_stmt
-            .or(NeedStatement::parse().map(Statement::Need))
-            .or(Expr::parse().map(Statement::Expr))
+        let_stmt.or(Expr::parse().map(Statement::Expr))
     }
 }
 
@@ -495,6 +491,27 @@ pub fn parse_str<'a>(
         .map((0..src.len()).into(), |(t, s): (_, _)| (t, s));
     // Parse the token stream with our chumsky parser
     Ast::parse().parse(token_stream).into_result()
+}
+
+// Helpers
+/////////////////////////////////
+
+trait ParenExt<'src, 'tok, I, O, E>: Parser<'src, I, O, E> + Clone + Sized
+where
+    I: Input<'src, Token = Token<'tok>>,
+    E: extra::ParserExtra<'src, I>,
+{
+    fn parenthesized(self) -> impl Parser<'src, I, O, E> + Clone {
+        self.delimited_by(just(normal!(ParenOpen)), just(normal!(ParenClose)))
+    }
+}
+
+impl<'src, 'tok, I, O, E, P> ParenExt<'src, 'tok, I, O, E> for P
+where
+    P: Parser<'src, I, O, E> + Clone,
+    I: Input<'src, Token = Token<'tok>>,
+    E: extra::ParserExtra<'src, I>,
+{
 }
 
 #[cfg(test)]
