@@ -3,8 +3,7 @@ use chumsky::input::Stream;
 use chumsky::{input::ValueInput, prelude::*};
 
 use super::lexer::{
-    command, normal, string, CommandToken, NormalToken, StringToken, Token,
-    Tokenizer,
+    command, normal, string, CommandToken, NormalToken, StringToken, Token, Tokenizer,
 };
 use super::string::Quoted;
 
@@ -80,8 +79,7 @@ impl<'tok> Argument<'tok> {
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
-        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>>
-            + Clone,
+        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>> + Clone,
     {
         Ident::parse()
             .then_ignore(just(normal!(Equals)))
@@ -100,8 +98,7 @@ impl<'tok> Arguments<'tok> {
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
-        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>>
-            + Clone,
+        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>> + Clone,
     {
         Argument::parse(expr)
             .spanned()
@@ -260,7 +257,10 @@ impl<'tok> Patterns<'tok> {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct Block<'a>(pub Vec<Statement<'a>>);
+pub struct Block<'a> {
+    pub statements: Vec<Statement<'a>>,
+    pub returns_last_value: bool,
+}
 
 impl<'tok> Block<'tok> {
     fn parse<'src: 'tok, I>(
@@ -271,8 +271,12 @@ impl<'tok> Block<'tok> {
         Statement::parse()
             .separated_by(just(normal!(Semicolon)))
             .collect::<Vec<_>>()
+            .then(just(normal!(Semicolon)).or_not())
             .delimited_by(just(normal!(BraceOpen)), just(normal!(BraceClose)))
-            .map(Block)
+            .map(|(statements, scln)| Block {
+                statements,
+                returns_last_value: matches!(scln, None),
+            })
     }
 }
 
@@ -320,10 +324,7 @@ impl<'tok> Command<MaybeQuoted<'tok>> {
             command!(QuotedString(s)) => MaybeQuoted::Quoted(s)
         };
         part.then(part.repeated().collect::<Vec<_>>())
-            .delimited_by(
-                just(normal!(CommandStart)),
-                just(command!(CommandEnd)),
-            )
+            .delimited_by(just(normal!(CommandStart)), just(command!(CommandEnd)))
             .map(|(executable, args)| Command { executable, args })
             .labelled("command")
     }
@@ -353,8 +354,7 @@ impl<'tok> NeedExpr<'tok> {
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
-        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>>
-            + Clone,
+        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>> + Clone,
     {
         just(normal!(Need))
             .ignore_then(expr.parenthesized())
@@ -443,12 +443,11 @@ impl<'tok> Decl<'tok> {
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        let target_header = select! {normal!(Ident("target")) => ()}
-            .ignore_then(
-                LitArguments::parse()
-                    .or_not()
-                    .map(|args| args.unwrap_or_default()),
-            );
+        let target_header = select! {normal!(Ident("target")) => ()}.ignore_then(
+            LitArguments::parse()
+                .or_not()
+                .map(|args| args.unwrap_or_default()),
+        );
         let target = target_header
             .then(TargetIdent::parse())
             .then(Block::parse())
@@ -471,9 +470,7 @@ impl<'tok> Ast<'tok> {
     }
 }
 
-pub fn parse_str<'a>(
-    src: &'a str,
-) -> Result<Ast<'a>, Vec<chumsky::error::Rich<'a, Token<'a>>>> {
+pub fn parse_str<'a>(src: &'a str) -> Result<Ast<'a>, Vec<chumsky::error::Rich<'a, Token<'a>>>> {
     let token_iter = Tokenizer::new(src)
         // Convert logos errors into tokens. We want parsing to be recoverable and not fail at the lexing stage, so
         // we have a dedicated `Token::Error` variant that represents a token error that was previously encountered

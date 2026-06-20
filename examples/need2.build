@@ -1,6 +1,6 @@
 target file(path) {
   print("Path: {path}");
-  "hello"
+  "hello";
 }
 
 target task("1") {

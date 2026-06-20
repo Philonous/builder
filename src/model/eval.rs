@@ -312,6 +312,7 @@ pub struct Slots(pub Vec<Slot>);
 #[derive(Debug, Default)]
 pub struct Block {
     pub statements: Vec<Statement>,
+    pub returns_last_value: bool,
     pub slots: Slots,
 }
 
@@ -323,7 +324,10 @@ impl<'a> Block {
 
         let mut result = Value::Unit.into();
         for statement in &self.statements {
-            result = statement.run(&mut this)?;
+            let res = statement.run(&mut this)?;
+            if self.returns_last_value {
+                result = res;
+            }
         }
         Ok(result)
     }
