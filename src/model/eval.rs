@@ -31,6 +31,8 @@ pub enum Error {
     DependencyError,
     #[error("Target {0} matches multiple patterns")]
     AmbiguousTarget(String),
+    #[error("Assertion failed: {0}")]
+    AssertionFailed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -168,7 +170,7 @@ impl Deferrable {
     pub fn force(&self, ctx: &mut EvalContext) -> Result<Value, Error> {
         Ok(match self {
             Deferrable::Deferred { target, request } => {
-                ctx.scheduler.force(*target, request)?.clone()
+                ctx.scheduler.force(ctx.resolved, *target, request)?
             }
             Deferrable::Immediate(value) => value.clone(),
         })
@@ -349,6 +351,12 @@ impl<'a> Into<DisplayCtx<'a>> for &'a Resolved {
             resolver: &self.resolver,
             records: &self.records,
         }
+    }
+}
+
+impl<'a> Into<DisplayCtx<'a>> for &'a EvalContext<'a> {
+    fn into(self) -> DisplayCtx<'a> {
+        self.resolved.into()
     }
 }
 
@@ -562,10 +570,57 @@ pub fn builtin_fun_print_debug(interner: &mut Rodeo) -> Fun {
         }),
     }
 }
+// Debug printing that isnt a barrier, so it gets executed without
+// flushing outstanding dependencies
+pub fn builtin_fun_assert_equal(interner: &mut Rodeo) -> Fun {
+    let print = interner.get_or_intern("assert_equal");
+    let left = interner.get_or_intern("left");
+    let right = interner.get_or_intern("right");
+    Fun {
+        name: Ident(print),
+        parameters: parameters::Parameters(vec![
+            (
+                Ident(left),
+                parameters::Parameter {
+                    default: None,
+                    span: None,
+                },
+            ),
+            (
+                Ident(right),
+                parameters::Parameter {
+                    default: None,
+                    span: None,
+                },
+            ),
+        ]),
+
+        // print
+        barrier: false,
+        body: FunBody::Builtin(|ctx, args| match args {
+            [left, right] => {
+                let left = left.force(ctx)?;
+                let right = right.force(ctx)?;
+                if (left != right) {
+                    return Err(Error::AssertionFailed(format!(
+                        "{} != {}",
+                        left.with_ctx(&*ctx),
+                        right.with_ctx(&*ctx)
+                    )));
+                }
+                Ok(Value::Unit)
+            }
+            // Analyser has checked that number of arguments is correct,
+            // so this is unreachable
+            _ => unreachable!("builtin print: invalid number of arguments"),
+        }),
+    }
+}
 
 pub fn builtin_functions(interner: &mut Rodeo) -> Functions {
     Functions(vec![
         builtin_fun_print(interner),
         builtin_fun_print_debug(interner),
+        builtin_fun_assert_equal(interner),
     ])
 }

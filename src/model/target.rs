@@ -420,37 +420,44 @@ impl Scheduler {
         }
     }
 
-    pub fn find_result(&self, request: &record::Record) -> Result<Option<&Value>, eval::Error> {
+    pub fn find_result(&self, request: &record::Record) -> Result<Option<Value>, eval::Error> {
         match self
             .requested
             .get(request)
             .expect("find_result on resource that has not be scheduled")
         {
-            TargetState::Done(v) => Ok(Some(v)),
+            TargetState::Done(v) => Ok(Some(v.clone())),
             TargetState::Error => Err(eval::Error::DependencyError),
             TargetState::Requested | TargetState::Running => Ok(None),
         }
     }
 
     // Force a single requested target
-    pub fn force(&self, target: TargetId, request: &record::Record) -> Result<&Value, eval::Error> {
+    pub fn force(
+        &mut self,
+        resolved: &eval::Resolved,
+        target: TargetId,
+        request: &record::Record,
+    ) -> Result<Value, eval::Error> {
         // Check if value is already present
         match self.find_result(request)? {
-            Some(v) => return Ok(v),
-            None => (),
-        };
-
-        // let res = self.run_one(resolved, outstanding)?;
-        // Value still deferred, run target now
-
-        todo!()
+            Some(v) => Ok(v),
+            None => {
+                let outstanding = Outstanding {
+                    target,
+                    request: request.clone(),
+                };
+                Ok(self.run_one(resolved, outstanding)?)
+                // Value still deferred, run target now
+            }
+        }
     }
 
     fn run_one(
         &mut self,
         resolved: &eval::Resolved,
         outstanding: Outstanding,
-    ) -> Result<(), eval::Error> {
+    ) -> Result<Value, eval::Error> {
         match resolved[outstanding.target].run(resolved, self, &outstanding.request) {
             Ok(v) => {
                 *self
@@ -458,7 +465,7 @@ impl Scheduler {
                     .get_mut(&outstanding.request)
                     // add() has added the item to requested as well
                     .expect("flush") = TargetState::Done(v.clone());
-                Ok(())
+                Ok(v)
             }
             Err(_) => {
                 *self
