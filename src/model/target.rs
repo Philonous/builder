@@ -34,14 +34,8 @@ pub struct Trace {
 pub enum TraceFun {
     Builtin {
         // Return of None means resource does not exist
-        fast: fn(
-            &record::Record,
-            &eval::Resolved,
-        ) -> Result<Option<FastTrace>, eval::Error>,
-        trace: fn(
-            &record::Record,
-            &eval::Resolved,
-        ) -> Result<Option<Trace>, eval::Error>,
+        fast: fn(&record::Record, &eval::Resolved) -> Result<Option<FastTrace>, eval::Error>,
+        trace: fn(&record::Record, &eval::Resolved) -> Result<Option<Trace>, eval::Error>,
     },
 }
 
@@ -94,9 +88,7 @@ impl TargetTypes {
     ) -> Result<TargetTypeId, Error> {
         let req_id = records
             .register(interner, request_name, request_fields)
-            .map_err(|record::Error::DuplicateRecordSchema(s)| {
-            Error::DuplicateTargetType(s)
-        })?;
+            .map_err(|record::Error::DuplicateRecordSchema(s)| Error::DuplicateTargetType(s))?;
 
         self.0.push(TargetType {
             request_schema: req_id,
@@ -106,10 +98,7 @@ impl TargetTypes {
         return Ok(TargetTypeId(self.0.len() - 1));
     }
 
-    pub fn find_by_request(
-        &self,
-        schema: RecordId,
-    ) -> Option<(TargetTypeId, &TargetType)> {
+    pub fn find_by_request(&self, schema: RecordId) -> Option<(TargetTypeId, &TargetType)> {
         self.0.iter().enumerate().find_map(|(ix, tt)| {
             if tt.request_schema == schema {
                 Some((TargetTypeId(ix), tt))
@@ -125,9 +114,7 @@ const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
         let path = rec.values[0].expect_string(resolved)?;
         let meta = match std::fs::metadata(path) {
             Ok(meta) => meta,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None)
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => Err(e)?,
         };
 
@@ -145,10 +132,10 @@ const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
     trace: |rec, resolved| {
         let path = rec.values[0].expect_string(resolved)?;
         let file = std::fs::File::open(path)?;
-        let hash = rapidhash::v3::rapidhash_v3_file_inline::<
-            &std::fs::File,
-            false,
-        >(&file, &rapidhash::v3::DEFAULT_RAPID_SECRETS)?;
+        let hash = rapidhash::v3::rapidhash_v3_file_inline::<&std::fs::File, false>(
+            &file,
+            &rapidhash::v3::DEFAULT_RAPID_SECRETS,
+        )?;
         Ok(Some(Trace { hash }))
     },
 };
@@ -230,9 +217,8 @@ impl Target {
         };
         let mut slots = self.slots.clone();
         for (to, from) in self.matchers.iter().enumerate() {
-            slots.0[to].value = eval::SlotState::Value(
-                eval::Deferrable::Immediate(request.values[*from].clone()),
-            );
+            slots.0[to].value =
+                eval::SlotState::Value(eval::Deferrable::Immediate(request.values[*from].clone()));
         }
         // Fill in variables with record elements
         let mut scope = ctx.enter(slots);
@@ -283,11 +269,7 @@ impl Target {
             }
             Err(e) => {
                 // TODO: Make use of span
-                eprintln!(
-                    "Target {} failed: {}",
-                    request.with_ctx(resolved),
-                    e.inner
-                );
+                eprintln!("Target {} failed: {}", request.with_ctx(resolved), e.inner);
                 return Err(e);
             }
         };
@@ -354,8 +336,7 @@ impl Targets {
             None => return Ok(None),
         };
         for (i, p) in &candidates[1..] {
-            if p.pattern.patterns.cmp_specificity(&cand.pattern.patterns)
-                == Some(Ordering::Greater)
+            if p.pattern.patterns.cmp_specificity(&cand.pattern.patterns) == Some(Ordering::Greater)
             {
                 cand = *p;
                 ix = *i;
@@ -394,6 +375,12 @@ pub struct Outstanding {
     request: record::Record,
 }
 
+pub struct Dependency {
+    target: record::Record,
+}
+
+pub struct Dependencies(Vec<Dependency>);
+
 #[derive(Debug, Default)]
 // single-threaded scheduler
 pub struct Scheduler {
@@ -427,18 +414,13 @@ impl Scheduler {
                 request.with_ctx(resolved).to_string(),
             ))
             .without_span(),
-            Some(TargetState::Error) => {
-                Err(eval::Error::DependencyError).without_span()
-            }
+            Some(TargetState::Error) => Err(eval::Error::DependencyError).without_span(),
             // Multiple need() on the same target - that's OK
             Some(TargetState::Requested) => Ok(()),
         }
     }
 
-    pub fn find_result(
-        &self,
-        request: &record::Record,
-    ) -> Result<Option<&Value>, eval::Error> {
+    pub fn find_result(&self, request: &record::Record) -> Result<Option<&Value>, eval::Error> {
         match self
             .requested
             .get(request)
@@ -451,15 +433,14 @@ impl Scheduler {
     }
 
     // Force a single requested target
-    pub fn force(
-        &self,
-        request: &record::Record,
-    ) -> Result<&Value, eval::Error> {
+    pub fn force(&self, target: TargetId, request: &record::Record) -> Result<&Value, eval::Error> {
         // Check if value is already present
         match self.find_result(request)? {
             Some(v) => return Ok(v),
             None => (),
         };
+
+        // let res = self.run_one(resolved, outstanding)?;
         // Value still deferred, run target now
 
         todo!()
@@ -470,11 +451,7 @@ impl Scheduler {
         resolved: &eval::Resolved,
         outstanding: Outstanding,
     ) -> Result<(), eval::Error> {
-        match resolved[outstanding.target].run(
-            resolved,
-            self,
-            &outstanding.request,
-        ) {
+        match resolved[outstanding.target].run(resolved, self, &outstanding.request) {
             Ok(v) => {
                 *self
                     .requested
@@ -494,10 +471,7 @@ impl Scheduler {
         }
     }
 
-    pub fn flush(
-        &mut self,
-        resolved: &eval::Resolved,
-    ) -> Result<(), eval::Error> {
+    pub fn flush(&mut self, resolved: &eval::Resolved) -> Result<(), eval::Error> {
         let items = std::mem::take(&mut self.outstanding);
         for outstanding in items {
             self.run_one(resolved, outstanding)?;

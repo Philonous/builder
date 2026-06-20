@@ -56,11 +56,7 @@ impl<'a> std::fmt::Debug for FunBody {
 }
 
 impl FunBody {
-    pub fn exec<'b>(
-        &self,
-        args: &[Deferrable],
-        ctx: &mut EvalContext<'b>,
-    ) -> Result<Value, Error> {
+    pub fn exec<'b>(&self, args: &[Deferrable], ctx: &mut EvalContext<'b>) -> Result<Value, Error> {
         match self {
             Self::Builtin(f) => f(ctx, args),
         }
@@ -155,7 +151,10 @@ impl<'a> From<Value> for Expr {
 
 #[derive(Debug, Clone)]
 pub enum Deferrable {
-    Deferred(record::Record),
+    Deferred {
+        target: target::TargetId,
+        request: record::Record,
+    },
     Immediate(Value),
 }
 
@@ -168,12 +167,8 @@ impl From<Value> for Deferrable {
 impl Deferrable {
     pub fn force(&self, ctx: &mut EvalContext) -> Result<Value, Error> {
         Ok(match self {
-            Deferrable::Deferred(record) => {
-                ctx.flush()?;
-                ctx.scheduler
-                    .find_result(&record)?
-                    .expect("deferrable not resolved after flush")
-                    .clone()
+            Deferrable::Deferred { target, request } => {
+                ctx.scheduler.force(*target, request)?.clone()
             }
             Deferrable::Immediate(value) => value.clone(),
         })
@@ -181,15 +176,10 @@ impl Deferrable {
 }
 
 impl Expr {
-    fn eval(
-        &self,
-        ctx: &mut EvalContext,
-    ) -> Result<Deferrable, error::Spanned<Error>> {
+    fn eval(&self, ctx: &mut EvalContext) -> Result<Deferrable, error::Spanned<Error>> {
         Ok(match &self.kind {
             ExprKind::Lit(val) => val.clone().into(),
-            ExprKind::Var(var) => {
-                ctx.read_var(var).with_opt_span(self.span)?.into()
-            }
+            ExprKind::Var(var) => ctx.read_var(var).with_opt_span(self.span)?.into(),
             ExprKind::Command { executable, args } => {
                 // Commands can see effects of targets, so we need to flush
                 ctx.flush().without_span()?;
@@ -219,29 +209,27 @@ impl Expr {
             }
             ExprKind::Need { request } => {
                 // TODO: register dependency
-                let value =
-                    request.eval(ctx)?.force(ctx).with_opt_span(self.span)?;
-                let request =
-                    value.expect_record(&ctx.resolved).without_span()?;
-                let target = match ctx
+                let value = request.eval(ctx)?.force(ctx).with_opt_span(self.span)?;
+                let request = value.expect_record(&ctx.resolved).without_span()?;
+                match ctx
                     .resolved
                     .targets
                     .match_(ctx.resolved, request)
                     .without_span()?
                 {
                     Some(target) => {
-                        ctx.scheduler.add(
-                            ctx.resolved,
-                            request.clone(),
+                        ctx.scheduler.add(ctx.resolved, request.clone(), target)?;
+                        Deferrable::Deferred {
                             target,
-                        )?;
+                            request: request.clone(),
+                        }
                     }
                     None => {
+                        todo!()
                         // No target matches requested resource
                         // TODO: register dependency and check existence
                     }
-                };
-                Deferrable::Deferred(request.clone())
+                }
             }
             ExprKind::Record { schema, fields } => {
                 let mut values = Vec::with_capacity(fields.len());
@@ -289,10 +277,7 @@ pub enum Statement {
 }
 
 impl Statement {
-    fn run<'a>(
-        &self,
-        ctx: &mut EvalContext<'a>,
-    ) -> Result<Deferrable, error::Spanned<Error>> {
+    fn run<'a>(&self, ctx: &mut EvalContext<'a>) -> Result<Deferrable, error::Spanned<Error>> {
         match self {
             Statement::Expr(v) => v.eval(ctx),
             Statement::Let { var, expr, span } => {
@@ -331,10 +316,7 @@ pub struct Block {
 }
 
 impl<'a> Block {
-    pub fn run(
-        &self,
-        ctx: &mut EvalContext<'a>,
-    ) -> Result<Deferrable, error::Spanned<Error>> {
+    pub fn run(&self, ctx: &mut EvalContext<'a>) -> Result<Deferrable, error::Spanned<Error>> {
         // Create new stack frame
 
         let mut this = ctx.enter(self.slots.clone());
@@ -354,6 +336,7 @@ pub struct EvalContext<'a> {
     pub variables: &'a mut Vec<Slots>,
     pub resolved: &'a Resolved,
     pub scheduler: &'a mut target::Scheduler,
+    //  pub dependencies: &'a mut target::Dependencies,
 }
 
 impl<'a> Into<DisplayCtx<'a>> for &'a Resolved {
@@ -559,11 +542,8 @@ pub fn builtin_fun_print_debug(interner: &mut Rodeo) -> Fun {
             [v] => {
                 // We *dont* force values here so we can see "under the hood"
                 match v {
-                    Deferrable::Deferred(record) => {
-                        println!(
-                            "<deferred: {}>",
-                            record.with_ctx(ctx.resolved)
-                        );
+                    Deferrable::Deferred { request, .. } => {
+                        println!("<deferred: {}>", request.with_ctx(ctx.resolved));
                     }
                     Deferrable::Immediate(v) => {
                         println!("{}", v.with_ctx(ctx.resolved));

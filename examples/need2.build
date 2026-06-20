@@ -1,0 +1,15 @@
+target file(path) {
+  print("Path: {path}");
+  "hello"
+}
+
+target task("1") {
+  let hello = need(file(path="test"));
+  let bla = need(file(path="bla"));
+  # Check that the value is deferred
+  print_debug(hello);
+  print("{hello} world");
+  # Now hello should be forced and bla still be deferred
+  print_debug(hello);
+  print_debug(bla)
+}
