@@ -5,10 +5,12 @@ use ariadne::Source;
 // mod error;
 mod analyser;
 mod common;
+mod db;
 mod error;
 mod model;
 mod parser;
 mod process;
+mod test;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -109,10 +111,7 @@ fn read_file(path: &PathBuf) -> String {
             std::process::exit(1);
         }
         Err(e) => {
-            eprintln!(
-                "Error reading build file {}: {e}",
-                path.to_string_lossy()
-            );
+            eprintln!("Error reading build file {}: {e}", path.to_string_lossy());
             std::process::exit(1);
         }
     }
