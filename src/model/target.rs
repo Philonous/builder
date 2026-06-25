@@ -6,6 +6,7 @@ use super::parameters::{Parameter, Parameters};
 use super::value::record;
 use super::value::Ident;
 use super::value::{RecordPattern, RecordSchemas, Value};
+use crate::db;
 use crate::error::{self, Spanned, WithSpan};
 use crate::model::eval::RecordId;
 use crate::model::value::WithDisplayCtxExt;
@@ -27,16 +28,48 @@ pub struct FastTrace {
     size: Option<u64>,          // In bytes, if available
 }
 
+#[derive(Debug, PartialOrd, Ord, PartialEq, Eq)]
 pub struct Trace {
     hash: u64,
 }
 
+impl std::fmt::Display for Trace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[T:{:X}]", self.hash)
+    }
+}
+
+/// Trace function determines the trace of the target such that when
+/// the trace stays the same, the target hasn't changed
+///
+/// Fast trace function
 pub enum TraceFun {
     Builtin {
         // Return of None means resource does not exist
         fast: fn(&record::Record, &eval::Resolved) -> Result<Option<FastTrace>, eval::Error>,
         trace: fn(&record::Record, &eval::Resolved) -> Result<Option<Trace>, eval::Error>,
     },
+}
+
+impl TraceFun {
+    fn fast(
+        &self,
+        resolved: &eval::Resolved,
+        request: &record::Record,
+    ) -> Result<Option<FastTrace>, eval::Error> {
+        match self {
+            TraceFun::Builtin { fast, .. } => fast(request, resolved),
+        }
+    }
+    fn trace(
+        &self,
+        resolved: &eval::Resolved,
+        request: &record::Record,
+    ) -> Result<Option<Trace>, eval::Error> {
+        match self {
+            TraceFun::Builtin { trace, .. } => trace(request, resolved),
+        }
+    }
 }
 
 impl Default for TraceFun {
@@ -60,6 +93,30 @@ pub struct TargetType {
     pub request_schema: RecordId,
     pub name_is: usize,
     pub trace: TraceFun,
+}
+
+impl TargetType {
+    /// Construct the request record from the name (e.g. from CLI)
+    pub fn request_from_name(
+        &self,
+        resolved: &eval::Resolved,
+        name: &str,
+    ) -> Option<record::Record> {
+        let schema = &resolved[self.request_schema];
+        let mut values = Vec::with_capacity(schema.fields.0.len());
+        for (ix, (_ident, param)) in schema.fields.0.iter().enumerate() {
+            let v = if self.name_is == ix {
+                Value::String(name.to_owned())
+            } else {
+                param.default.clone()?
+            };
+            values.push(v);
+        }
+        Some(record::Record {
+            schema: self.request_schema,
+            values: values,
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -136,6 +193,7 @@ const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
             &file,
             &rapidhash::v3::DEFAULT_RAPID_SECRETS,
         )?;
+        tracing::debug!("trace fun hashed file {}: {:X}", path, hash);
         Ok(Some(Trace { hash }))
     },
 };
@@ -195,8 +253,9 @@ pub struct Target {
     pub pattern: RecordPattern,
     // Resolved variable slots for target parameters
     pub slots: eval::Slots,
-    // How to match request arguments to target parameter slots
-    // If the ith entry is k, then put the kth value into slot i
+    // How to match request arguments to target parameter slots. If the
+    // ith entry is k, then put the kth value of the request record
+    // into slot i
     pub matchers: Vec<usize>,
     pub block: eval::Block,
 }
@@ -208,27 +267,29 @@ impl Target {
         resolved: &eval::Resolved,
         scheduler: &mut Scheduler,
         request: &record::Record,
-    ) -> Result<Value, error::Spanned<eval::Error>> {
+    ) -> Result<(Value, Dependencies), error::Spanned<eval::Error>> {
         let mut variables = Default::default();
-        let mut ctx = eval::EvalContext {
-            variables: &mut variables,
-            resolved,
-            scheduler,
+        let mut dependencies: Dependencies = Default::default();
+        let res = {
+            let mut ctx = eval::EvalContext {
+                variables: &mut variables,
+                resolved,
+                scheduler,
+                dependencies: &mut dependencies,
+            };
+            // Fill in variables with record elements
+            let mut slots = self.slots.clone();
+            for (to, from) in self.matchers.iter().enumerate() {
+                slots.0[to].value = eval::SlotState::Value(request.values[*from].clone().into());
+            }
+            let mut scope = ctx.enter(slots);
+            // tracing::trace!("Starting build");
+            self.block
+                .run(&mut scope)?
+                .force(&mut scope)
+                .without_span()?
         };
-        let mut slots = self.slots.clone();
-        for (to, from) in self.matchers.iter().enumerate() {
-            slots.0[to].value =
-                eval::SlotState::Value(eval::Deferrable::Immediate(request.values[*from].clone()));
-        }
-        // Fill in variables with record elements
-        let mut scope = ctx.enter(slots);
-        // tracing::trace!("Starting build");
-        let res = self
-            .block
-            .run(&mut scope)?
-            .force(&mut scope)
-            .without_span()?;
-        Ok(res)
+        Ok((res, dependencies))
     }
 
     // Try to match the target to a single string (e.g. cli)
@@ -250,8 +311,8 @@ impl Target {
         tracing::error_span!("target", target = tgt);
         // TODO: Check database for dependencies and query them
         // TODO: Compare traces
-        let v = match self.execute(resolved, scheduler, request) {
-            Ok(v) => {
+        let (v, trace) = match self.execute(resolved, scheduler, request) {
+            Ok((v, dependencies)) => {
                 match v {
                     Value::Unit => {
                         eprintln!("Target {} finished", tgt);
@@ -264,8 +325,13 @@ impl Target {
                         );
                     }
                 }
+                eprintln!("Registered dependencies: {:?}", dependencies);
+                let target_type = &resolved[self.kind];
+                // TODO: Make use of fast trace
+                // let fast_trace = target_type.trace.fast(resolved, &request).without_span()?;
+                let trace = target_type.trace.trace(resolved, &request).without_span()?;
 
-                v
+                (v, trace)
             }
             Err(e) => {
                 // TODO: Make use of span
@@ -273,8 +339,10 @@ impl Target {
                 return Err(e);
             }
         };
-        // Execute should have flushed by forcing the return value, but no harm in doing it explicitly
+
         scheduler.flush(resolved).without_span()?;
+        trace.map(|trace| tracing::info!("Target finished, trace: {}", trace));
+
         Ok(v)
         // TODO: Compare traces
         // TODO: Cleanness
@@ -284,7 +352,7 @@ impl Target {
 #[derive(Default, Debug)]
 pub struct Targets(Vec<Target>);
 
-#[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Default, Hash, Debug, PartialEq, Eq, Clone, Copy)]
 pub struct TargetId(usize);
 
 impl<'a> std::ops::Index<TargetId> for Targets {
@@ -375,11 +443,20 @@ pub struct Outstanding {
     request: record::Record,
 }
 
+#[derive(Debug, Hash, PartialEq, Eq)]
 pub struct Dependency {
-    target: record::Record,
+    target: TargetId,
+    request: record::Record,
 }
 
-pub struct Dependencies(Vec<Dependency>);
+#[derive(Debug, Default)]
+pub struct Dependencies(HashMap<Dependency, Option<u64>>);
+
+impl Dependencies {
+    pub fn add(&mut self, target: TargetId, request: record::Record) {
+        self.0.insert(Dependency { target, request }, None);
+    }
+}
 
 #[derive(Debug, Default)]
 // single-threaded scheduler

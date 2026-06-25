@@ -220,6 +220,7 @@ impl Expr {
                     .without_span()?
                 {
                     Some(target) => {
+                        ctx.dependencies.add(target, request.clone());
                         ctx.scheduler.add(ctx.resolved, request.clone(), target)?;
                         Deferrable::Deferred {
                             target,
@@ -342,7 +343,7 @@ pub struct EvalContext<'a> {
     pub variables: &'a mut Vec<Slots>,
     pub resolved: &'a Resolved,
     pub scheduler: &'a mut target::Scheduler,
-    //  pub dependencies: &'a mut target::Dependencies,
+    pub dependencies: &'a mut target::Dependencies,
 }
 
 impl<'a> Into<DisplayCtx<'a>> for &'a Resolved {
@@ -376,6 +377,7 @@ impl<'a> EvalContext<'a> {
             variables: self.variables, // implicit reborrow for the '_ borrow
             resolved: self.resolved,
             scheduler: self.scheduler,
+            dependencies: self.dependencies,
         }
     }
 
@@ -570,8 +572,7 @@ pub fn builtin_fun_print_debug(interner: &mut Rodeo) -> Fun {
         }),
     }
 }
-// Debug printing that isnt a barrier, so it gets executed without
-// flushing outstanding dependencies
+
 pub fn builtin_fun_assert_equal(interner: &mut Rodeo) -> Fun {
     let print = interner.get_or_intern("assert_equal");
     let left = interner.get_or_intern("left");
@@ -617,10 +618,51 @@ pub fn builtin_fun_assert_equal(interner: &mut Rodeo) -> Fun {
     }
 }
 
+pub fn builtin_fun_write_file(interner: &mut Rodeo) -> Fun {
+    let write_file = interner.get_or_intern("write_file");
+    let path = interner.get_or_intern("path");
+    let val = interner.get_or_intern("val");
+    Fun {
+        name: Ident(write_file),
+        parameters: parameters::Parameters(vec![
+            (
+                Ident(path),
+                parameters::Parameter {
+                    default: None,
+                    span: None,
+                },
+            ),
+            (
+                Ident(val),
+                parameters::Parameter {
+                    default: None,
+                    span: None,
+                },
+            ),
+        ]),
+
+        barrier: true,
+        body: FunBody::Builtin(|ctx, args| match args {
+            [path, val] => {
+                let path = path.force(ctx)?;
+                let path = path.expect_string(ctx.resolved)?;
+                let val = val.force(ctx)?;
+                std::fs::write(path, val.with_ctx(ctx.resolved).to_string())?;
+
+                Ok(Value::Unit)
+            }
+            // Analyser has checked that number of arguments is correct,
+            // so this is unreachable
+            _ => unreachable!("builtin print: invalid number of arguments"),
+        }),
+    }
+}
+
 pub fn builtin_functions(interner: &mut Rodeo) -> Functions {
     Functions(vec![
         builtin_fun_print(interner),
         builtin_fun_print_debug(interner),
         builtin_fun_assert_equal(interner),
+        builtin_fun_write_file(interner),
     ])
 }

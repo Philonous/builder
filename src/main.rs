@@ -147,8 +147,13 @@ fn main() {
                     std::process::exit(1)
                 }
             };
+            let target_type = &resolved[target.kind];
+            let request = target_type
+                .request_from_name(&resolved, &item)
+                .expect("construct request from name");
             let mut scheduler = model::target::Scheduler::new();
-            match target.run(&resolved, &mut scheduler, &Default::default()) {
+
+            match target.run(&resolved, &mut scheduler, &request) {
                 Err(e) => {
                     eprintln!("Build failed:: {}", e);
                     std::process::exit(1)
