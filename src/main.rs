@@ -5,14 +5,15 @@ use ariadne::Source;
 // mod error;
 mod analyser;
 mod common;
-mod db;
 mod error;
 mod model;
 mod parser;
 mod process;
+mod store;
 mod test;
 
 use clap::{Parser, Subcommand};
+use model::target::database::Database;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -86,7 +87,10 @@ fn parse(src: &str) -> parser::parser::Ast<'_> {
     }
 }
 
-fn resolve<'a>(src: &'a str, ast: parser::parser::Ast<'a>) -> Resolved {
+fn resolve<'a>(
+    src: &'a str,
+    ast: parser::parser::Ast<'a>,
+) -> Resolved<lasso::Rodeo> {
     match ast.resolve() {
         Ok(decls) => decls,
         Err(error::Errors(errs)) => {
@@ -111,7 +115,10 @@ fn read_file(path: &PathBuf) -> String {
             std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("Error reading build file {}: {e}", path.to_string_lossy());
+            eprintln!(
+                "Error reading build file {}: {e}",
+                path.to_string_lossy()
+            );
             std::process::exit(1);
         }
     }
@@ -139,7 +146,29 @@ fn main() {
         }
         Command::Run { item } => {
             let ast = parse(&src);
-            let resolved = resolve(&src, ast);
+            let mut resolved = resolve(&src, ast);
+            let (mut database, needs_compaction) = Database::load(
+                "build.db",
+                true,
+                &mut resolved.resolver,
+                &resolved.records,
+            )
+            .unwrap()
+            .unwrap();
+            let resolved = Resolved {
+                resolver: resolved.resolver.into_resolver(),
+                functions: resolved.functions,
+                records: resolved.records,
+                target_types: resolved.target_types,
+                targets: resolved.targets,
+            };
+
+            if needs_compaction {
+                tracing::debug!("Compacting database");
+                // TODO: proper error handling
+                database.compact(&resolved).expect("compact");
+            }
+
             let target = match resolved.targets.find_by_string(&item) {
                 Ok(t) => t,
                 Err(e) => {
@@ -151,17 +180,21 @@ fn main() {
             let request = target_type
                 .request_from_name(&resolved, &item)
                 .expect("construct request from name");
-            let mut scheduler = model::target::Scheduler::new();
+
+            let mut scheduler = model::target::Scheduler::new(database);
 
             match target.run(&resolved, &mut scheduler, &request) {
                 Err(e) => {
                     eprintln!("Build failed:: {}", e);
                     std::process::exit(1)
                 }
-                Ok(val) => match val {
+                Ok(res) => match res.value {
                     model::eval::Value::Unit => (),
                     _ => {
-                        println!("Build finished: {}", val.with_ctx(&resolved))
+                        println!(
+                            "Build finished: {}",
+                            res.value.with_ctx(&resolved)
+                        )
                     }
                 },
             }

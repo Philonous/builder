@@ -82,11 +82,7 @@ pub struct Record {
 }
 
 impl<'a> DisplayWith for Record {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-        ctx: DisplayCtx,
-    ) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>, ctx: DisplayCtx) -> std::fmt::Result {
         let schema = &ctx.records[self.schema];
         schema.name.with_ctx(ctx).fmt(f)?;
         write!(f, "(")?;

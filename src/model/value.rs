@@ -1,5 +1,6 @@
 pub mod display;
 pub mod record;
+pub mod serialize;
 
 use std::fmt;
 
@@ -61,10 +62,7 @@ impl Value {
         }
     }
 
-    pub fn expect_string(
-        &self,
-        resolved: &Resolved,
-    ) -> Result<&str, eval::Error> {
+    pub fn expect_string(&self, resolved: &Resolved) -> Result<&str, eval::Error> {
         match self {
             Self::String(s) => Ok(&s),
             _ => Err(eval::Error::TypeError {
@@ -74,10 +72,7 @@ impl Value {
         }
     }
 
-    pub fn expect_record(
-        &self,
-        resolved: &Resolved,
-    ) -> Result<&Record, eval::Error> {
+    pub fn expect_record(&self, resolved: &Resolved) -> Result<&Record, eval::Error> {
         match self {
             Self::Record(r) => Ok(&r),
             _ => Err(eval::Error::TypeError {

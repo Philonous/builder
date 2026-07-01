@@ -8,8 +8,6 @@ use crate::model::target::{TargetType, TargetTypeId, TargetTypes, Targets};
 use crate::model::value::{Ident, RecordPattern, RecordSchemas};
 use crate::parser::string::QuoteError;
 
-use std::ops::Deref;
-
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("variable {0} was already declared")]
@@ -608,7 +606,7 @@ fn register_builtin_target_types(
 }
 
 impl<'a> parser::Ast<'a> {
-    pub fn resolve(self) -> Result<eval::Resolved, Errors<Error>> {
+    pub fn resolve(self) -> Result<eval::Resolved<Rodeo>, Errors<Error>> {
         let mut errors = Errors::empty();
 
         let mut interner = Rodeo::new();
@@ -642,7 +640,7 @@ impl<'a> parser::Ast<'a> {
 
         errors.ok(eval::Resolved {
             functions,
-            resolver: interner.into_resolver(),
+            resolver: interner,
             records,
             target_types,
             targets,

@@ -27,12 +27,14 @@ pub enum Error {
     IOError(#[from] std::io::Error),
     #[error("Circular dependency in target {0}")]
     CircularDependency(String),
-    #[error("Dependency encountered an error")]
-    DependencyError,
+    #[error("Dependency {0} encountered an error")]
+    DependencyError(String),
     #[error("Target {0} matches multiple patterns")]
     AmbiguousTarget(String),
     #[error("Assertion failed: {0}")]
     AssertionFailed(String),
+    #[error("Error while handling target database")]
+    DatabaseError,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +60,11 @@ impl<'a> std::fmt::Debug for FunBody {
 }
 
 impl FunBody {
-    pub fn exec<'b>(&self, args: &[Deferrable], ctx: &mut EvalContext<'b>) -> Result<Value, Error> {
+    pub fn exec<'b>(
+        &self,
+        args: &[Deferrable],
+        ctx: &mut EvalContext<'b>,
+    ) -> Result<Value, Error> {
         match self {
             Self::Builtin(f) => f(ctx, args),
         }
@@ -170,7 +176,19 @@ impl Deferrable {
     pub fn force(&self, ctx: &mut EvalContext) -> Result<Value, Error> {
         Ok(match self {
             Deferrable::Deferred { target, request } => {
-                ctx.scheduler.force(ctx.resolved, *target, request)?
+                // Forcing a value is a layer boundary - later
+                // dependencies can depend on this value, so they have
+                // to be in a new layer
+                ctx.dependencies.new_layer();
+                ctx.scheduler
+                    .demand(
+                        ctx.resolved,
+                        target::Request {
+                            target: *target,
+                            request: request.clone(),
+                        },
+                    )?
+                    .value
             }
             Deferrable::Immediate(value) => value.clone(),
         })
@@ -178,13 +196,18 @@ impl Deferrable {
 }
 
 impl Expr {
-    fn eval(&self, ctx: &mut EvalContext) -> Result<Deferrable, error::Spanned<Error>> {
+    fn eval(
+        &self,
+        ctx: &mut EvalContext,
+    ) -> Result<Deferrable, error::Spanned<Error>> {
         Ok(match &self.kind {
             ExprKind::Lit(val) => val.clone().into(),
-            ExprKind::Var(var) => ctx.read_var(var).with_opt_span(self.span)?.into(),
+            ExprKind::Var(var) => {
+                ctx.read_var(var).with_opt_span(self.span)?.into()
+            }
             ExprKind::Command { executable, args } => {
                 // Commands can see effects of targets, so we need to flush
-                ctx.flush().without_span()?;
+                ctx.flush_dependencies().without_span()?;
                 let cmd = command::Command {
                     executable: executable.clone(),
                     args: args.clone(),
@@ -197,7 +220,7 @@ impl Expr {
                 // Functions with observable effects need outstanding
                 // targets to be flushed before they can run
                 if fun.barrier {
-                    ctx.flush().with_opt_span(self.span)?;
+                    ctx.flush_dependencies().with_opt_span(self.span)?;
                 }
                 let mut args_acc = Vec::with_capacity(args.len());
                 for expr in args.iter() {
@@ -210,28 +233,21 @@ impl Expr {
                     .into()
             }
             ExprKind::Need { request } => {
-                // TODO: register dependency
-                let value = request.eval(ctx)?.force(ctx).with_opt_span(self.span)?;
-                let request = value.expect_record(&ctx.resolved).without_span()?;
-                match ctx
-                    .resolved
-                    .targets
-                    .match_(ctx.resolved, request)
-                    .without_span()?
-                {
-                    Some(target) => {
-                        ctx.dependencies.add(target, request.clone());
-                        ctx.scheduler.add(ctx.resolved, request.clone(), target)?;
-                        Deferrable::Deferred {
-                            target,
-                            request: request.clone(),
-                        }
-                    }
-                    None => {
-                        todo!()
-                        // No target matches requested resource
-                        // TODO: register dependency and check existence
-                    }
+                let value =
+                    request.eval(ctx)?.force(ctx).with_opt_span(self.span)?;
+                let request =
+                    value.expect_record(&ctx.resolved).without_span()?;
+                // register dependency
+                ctx.dependencies.add(request.clone());
+
+                let target = ctx.scheduler.add(ctx.resolved, request)?;
+                ctx.outstanding.push(target::Request {
+                    target,
+                    request: request.clone(),
+                });
+                Deferrable::Deferred {
+                    target,
+                    request: request.clone(),
                 }
             }
             ExprKind::Record { schema, fields } => {
@@ -280,7 +296,10 @@ pub enum Statement {
 }
 
 impl Statement {
-    fn run<'a>(&self, ctx: &mut EvalContext<'a>) -> Result<Deferrable, error::Spanned<Error>> {
+    fn run<'a>(
+        &self,
+        ctx: &mut EvalContext<'a>,
+    ) -> Result<Deferrable, error::Spanned<Error>> {
         match self {
             Statement::Expr(v) => v.eval(ctx),
             Statement::Let { var, expr, span } => {
@@ -320,7 +339,10 @@ pub struct Block {
 }
 
 impl<'a> Block {
-    pub fn run(&self, ctx: &mut EvalContext<'a>) -> Result<Deferrable, error::Spanned<Error>> {
+    pub fn run(
+        &self,
+        ctx: &mut EvalContext<'a>,
+    ) -> Result<Deferrable, error::Spanned<Error>> {
         // Create new stack frame
 
         let mut this = ctx.enter(self.slots.clone());
@@ -336,7 +358,6 @@ impl<'a> Block {
     }
 }
 
-#[derive(Debug)]
 pub struct EvalContext<'a> {
     // TODO: constants
     // Stacked list
@@ -344,6 +365,7 @@ pub struct EvalContext<'a> {
     pub resolved: &'a Resolved,
     pub scheduler: &'a mut target::Scheduler,
     pub dependencies: &'a mut target::Dependencies,
+    pub outstanding: &'a mut Vec<target::Request>,
 }
 
 impl<'a> Into<DisplayCtx<'a>> for &'a Resolved {
@@ -362,9 +384,9 @@ impl<'a> Into<DisplayCtx<'a>> for &'a EvalContext<'a> {
 }
 
 #[derive(Debug)]
-pub struct Resolved {
+pub struct Resolved<R = RodeoResolver> {
     pub functions: Functions,
-    pub resolver: RodeoResolver,
+    pub resolver: R,
     pub records: RecordSchemas,
     pub target_types: TargetTypes,
     pub targets: Targets,
@@ -378,15 +400,23 @@ impl<'a> EvalContext<'a> {
             resolved: self.resolved,
             scheduler: self.scheduler,
             dependencies: self.dependencies,
+            outstanding: self.outstanding,
         }
     }
 
-    pub fn flush(&mut self) -> Result<(), Error> {
-        self.scheduler.flush(self.resolved)
+    pub fn flush_dependencies(&mut self) -> Result<(), Error> {
+        // Start a new dependency layer since later dependencies can
+        // depend on the current ones (e.g. by reading from files)
+        self.dependencies.new_layer();
+        for outstanding in std::mem::take(self.outstanding) {
+            tracing::trace!("Flushing dependency: {:?}", outstanding);
+            self.scheduler.demand(self.resolved, outstanding)?;
+        }
+        Ok(())
     }
 }
 
-impl<'a> std::ops::Index<FunId> for Resolved {
+impl<'a, T> std::ops::Index<FunId> for Resolved<T> {
     type Output = Fun;
 
     fn index(&self, index: FunId) -> &Self::Output {
@@ -394,7 +424,7 @@ impl<'a> std::ops::Index<FunId> for Resolved {
     }
 }
 
-impl<'a> std::ops::Index<RecordId> for Resolved {
+impl<'a, T> std::ops::Index<RecordId> for Resolved<T> {
     type Output = RecordSchema;
 
     fn index(&self, index: RecordId) -> &Self::Output {
@@ -402,7 +432,7 @@ impl<'a> std::ops::Index<RecordId> for Resolved {
     }
 }
 
-impl<'a> std::ops::Index<TargetTypeId> for Resolved {
+impl<'a, T> std::ops::Index<TargetTypeId> for Resolved<T> {
     type Output = TargetType;
 
     fn index(&self, index: TargetTypeId) -> &Self::Output {
@@ -410,7 +440,7 @@ impl<'a> std::ops::Index<TargetTypeId> for Resolved {
     }
 }
 
-impl<'a> std::ops::Index<TargetId> for Resolved {
+impl<'a, T> std::ops::Index<TargetId> for Resolved<T> {
     type Output = Target;
 
     fn index(&self, index: TargetId) -> &Self::Output {
@@ -433,7 +463,7 @@ impl<'a> Drop for EvalContext<'a> {
 }
 
 impl<'a> EvalContext<'a> {
-    fn read_var_raw(&mut self, var: &Var) -> Result<Option<Deferrable>, Error> {
+    fn read_var(&mut self, var: &Var) -> Result<Deferrable, Error> {
         // The innermost scope is the *last* one
         let ix = &self.variables.len() - var.nesting - 1;
         let slot = &(&self.variables[ix].0)[var.slot];
@@ -448,22 +478,9 @@ impl<'a> EvalContext<'a> {
             }
             SlotState::Value(v) => {
                 tracing::trace!("Read variable {:?}, got: {:?}", var, v);
-                Ok(Some(v.clone()))
+                Ok(v.clone())
             }
         }
-    }
-
-    fn read_var(&mut self, var: &Var) -> Result<Deferrable, Error> {
-        Ok(match self.read_var_raw(var)? {
-            Some(v) => v,
-            // Deferred variable, flush outstanding operations
-            // (e.g. requested targets) and try again
-            None => {
-                self.flush()?;
-                self.read_var_raw(var)?
-                    .expect("flush did not fill deferred variable")
-            }
-        })
     }
 
     fn init_var(&mut self, var: &Var, val: Deferrable) -> Result<(), Error> {
@@ -557,7 +574,10 @@ pub fn builtin_fun_print_debug(interner: &mut Rodeo) -> Fun {
                 // We *dont* force values here so we can see "under the hood"
                 match v {
                     Deferrable::Deferred { request, .. } => {
-                        println!("<deferred: {}>", request.with_ctx(ctx.resolved));
+                        println!(
+                            "<deferred: {}>",
+                            request.with_ctx(ctx.resolved)
+                        );
                     }
                     Deferrable::Immediate(v) => {
                         println!("{}", v.with_ctx(ctx.resolved));
@@ -602,7 +622,7 @@ pub fn builtin_fun_assert_equal(interner: &mut Rodeo) -> Fun {
             [left, right] => {
                 let left = left.force(ctx)?;
                 let right = right.force(ctx)?;
-                if (left != right) {
+                if left != right {
                     return Err(Error::AssertionFailed(format!(
                         "{} != {}",
                         left.with_ctx(&*ctx),

@@ -1,6 +1,6 @@
 use std::{
     fs::create_dir_all,
-    path::{absolute, Path, PathBuf},
+    path::{absolute, PathBuf},
 };
 
 pub struct TempDir(PathBuf);

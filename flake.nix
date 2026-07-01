@@ -21,6 +21,7 @@
                  pkgs.go-task
                  pkgs.rust-analyzer
                  pkgs.gdb
+                 pkgs.rustfmt
                ] ;
 
       in

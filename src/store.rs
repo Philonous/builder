@@ -2,7 +2,7 @@ use parking_lot::Mutex;
 use std::{
     fs::{File, OpenOptions, TryLockError},
     io::{ErrorKind, Read, Seek, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 /// Stores records (list of arbitrary slices of u8) in a file - append
@@ -13,7 +13,8 @@ use std::{
 /// read, then starts calling append. append before reads reached the
 /// end will panic, reads after the end has been reached once will always
 /// return None, even if more records have been added.
-pub struct Database {
+pub struct Store {
+    pub path: PathBuf,
     file: Mutex<File>,
     // Length of file at start (and never updated) so we don't have to
     // read metadata on every read - concurrent writes are forbidden.
@@ -22,7 +23,7 @@ pub struct Database {
     reached_end: bool,
 }
 
-impl Database {
+impl Store {
     /// Open database, returning Some(db) on success, None when the
     /// databse is locked. Blocks until the database is available when
     /// block is true
@@ -36,7 +37,7 @@ impl Database {
             Ok(_) => {} // File now locked
             Err(TryLockError::WouldBlock) => {
                 tracing::info!(
-                    "Database file {:?} locked, waiting for other processes to finish",
+                    "Store file {:?} locked, waiting for other processes to finish",
                     path.as_ref()
                 );
                 if block {
@@ -49,11 +50,40 @@ impl Database {
         }
 
         let length = file.metadata()?.len();
-        Ok(Some(Database {
+        Ok(Some(Store {
+            path: path.as_ref().to_owned(),
             file: Mutex::new(file),
             length,
             reached_end: false,
         }))
+    }
+
+    // Force-create a new database
+    pub fn new(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        let file = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(path.as_ref())?;
+        match file.try_lock() {
+            Ok(_) => {}
+            Err(TryLockError::Error(e)) => {
+                return Err(e);
+            }
+            Err(TryLockError::WouldBlock) => {
+                tracing::error!(
+                    "EWOULDBLOCK while locking newly created file {:?}",
+                    path.as_ref()
+                );
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+        }
+
+        Ok(Store {
+            path: path.as_ref().to_owned(),
+            file: Mutex::new(file),
+            length: 0,
+            reached_end: true,
+        })
     }
 
     pub fn next_record(&mut self) -> Result<Option<Vec<u8>>, std::io::Error> {
@@ -114,7 +144,7 @@ impl Database {
     pub fn append_record(&mut self, record: &[u8]) -> Result<(), std::io::Error> {
         assert!(
             self.reached_end,
-            "Database needs to be at end position before writing"
+            "Store needs to be at end position before writing"
         );
         let mut file = self.file.lock();
         file.write_all(&(record.len() as u32).to_be_bytes())?;
@@ -125,7 +155,7 @@ impl Database {
     }
 }
 
-impl Iterator for Database {
+impl Iterator for Store {
     type Item = Result<Vec<u8>, std::io::Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -143,7 +173,7 @@ mod test {
     #[test]
     fn simple_roundtrip() {
         let tmp = TempDir::create("test-simple-roundrip");
-        let mut db = Database::open(tmp.join("db"), true).unwrap().unwrap();
+        let mut db = Store::open(tmp.join("db"), true).unwrap().unwrap();
         // We have to read to the end first
         assert_eq!(db.next_record().unwrap(), None);
         for record in EXAMPLE {
@@ -151,7 +181,7 @@ mod test {
         }
         drop(db);
 
-        let db = Database::open(tmp.join("db"), true).unwrap().unwrap();
+        let db = Store::open(tmp.join("db"), true).unwrap().unwrap();
         let res = db.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(res, EXAMPLE);
     }
@@ -159,7 +189,7 @@ mod test {
     #[test]
     fn iterate_then_append() {
         let tmp = TempDir::create("iterate-then-append");
-        let mut db = Database::open(tmp.join("db"), true).unwrap().unwrap();
+        let mut db = Store::open(tmp.join("db"), true).unwrap().unwrap();
         // We have to read to the end first
         for _ in &mut db {}
         for record in EXAMPLE {
@@ -167,7 +197,7 @@ mod test {
         }
         drop(db);
 
-        let db = Database::open(tmp.join("db"), true).unwrap().unwrap();
+        let db = Store::open(tmp.join("db"), true).unwrap().unwrap();
         let res = db.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(res, EXAMPLE);
     }
@@ -183,7 +213,7 @@ mod test {
         file.flush().expect("flush");
         file.sync_all().expect("sync_all");
         drop(file);
-        let mut db = Database::open(tmp.join("db"), true).unwrap().unwrap();
+        let mut db = Store::open(tmp.join("db"), true).unwrap().unwrap();
         assert_eq!(
             db.next_record().unwrap().as_deref(),
             Some(&[10u8, 11, 12] as &[u8])
@@ -200,12 +230,12 @@ mod test {
     #[test]
     fn file_locking() {
         let tmp = TempDir::create("test-file-locking");
-        let db = Database::open(tmp.join("db"), false).unwrap();
+        let db = Store::open(tmp.join("db"), false).unwrap();
         assert!(matches!(db, Some(_)));
         drop(db);
-        let db = Database::open(tmp.join("db"), true).unwrap();
+        let db = Store::open(tmp.join("db"), true).unwrap();
         assert!(matches!(db, Some(_)));
-        let db = Database::open(tmp.join("db"), false).unwrap();
+        let db = Store::open(tmp.join("db"), false).unwrap();
         assert!(matches!(db, None));
     }
 }
