@@ -8,6 +8,7 @@ use super::value::record;
 use super::value::Ident;
 use super::value::{RecordPattern, RecordSchemas, Value};
 use crate::error::{self, Spanned, WithSpan};
+use crate::log::blog;
 use crate::model::eval::RecordId;
 use crate::model::value::WithDisplayCtxExt;
 use database::{Database, DatabaseEntry};
@@ -420,7 +421,7 @@ impl Target {
         let target_type = &resolved[self.kind];
         let tgt = request.with_ctx(resolved).to_string();
 
-        eprintln!("Executing target {}", tgt);
+        blog!(info, target = tgt, "Running target");
         tracing::error_span!("target", target = tgt);
 
         let before_trace =
@@ -440,8 +441,10 @@ impl Target {
                 if trace_clean
                     && Target::all_deps_clean(scheduler, resolved, &tgt, &c)?
                 {
-                    eprintln!(
-                        "Target {tgt} is clean and doesn't need to be run"
+                    blog!(
+                        info,
+                        target = tgt,
+                        "Target is clean and doesn't need to be run"
                     );
 
                     return Ok(TargetResult {
@@ -459,9 +462,10 @@ impl Target {
                 Ok((v, dependencies)) => (v, dependencies),
                 Err(e) => {
                     // TODO: Make use of span
-                    eprintln!(
-                        "Target {} failed: {}",
-                        request.with_ctx(resolved),
+                    blog!(
+                        error,
+                        target = request.with_ctx(resolved),
+                        "Target failed: {}",
                         e.inner
                     );
                     return Err(e);
@@ -470,20 +474,22 @@ impl Target {
 
         match value {
             Value::Unit => {
-                eprintln!("Target {} finished", tgt);
+                blog!(info, target = tgt, "Target finished");
             }
             _ => {
-                eprintln!(
-                    "Target {} finished, return value: {}",
-                    tgt,
+                blog!(
+                    info,
+                    target = tgt,
+                    "Target finished, return value: {}",
                     value.with_ctx(resolved)
                 );
             }
         }
         if dependencies.len() > 0 {
-            eprintln!(
+            tracing::debug!(
                 "Target {} registered dependencies: {:?}",
-                tgt, dependencies
+                tgt,
+                dependencies
             );
         }
 
@@ -512,7 +518,7 @@ impl Target {
 
         let clean = match (&before_trace, &after_trace) {
             (Some(b), Some(a)) if b == a => {
-                eprintln!("Target {tgt} unchanged");
+                blog!(info, target = tgt, "Target is unchanged");
                 true
             }
             _ => false,
@@ -728,7 +734,7 @@ impl Scheduler {
                     // Entry must exist by construction
                     .expect("flush") = TargetState::Error;
                 let tgt = request.request.with_ctx(resolved).to_string();
-                eprintln!("Target {tgt} failed with: {e}");
+                blog!(error, target = tgt, "Target failed with: {e}");
                 Err(eval::Error::DependencyError(tgt))
             }
         }

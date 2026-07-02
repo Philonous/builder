@@ -1,4 +1,8 @@
-use std::{fs, io::ErrorKind, sync::Arc};
+use std::{
+    fs,
+    io::{ErrorKind, IsTerminal},
+    sync::Arc,
+};
 
 use ariadne::Source;
 
@@ -6,6 +10,7 @@ use ariadne::Source;
 mod analyser;
 mod common;
 mod error;
+mod log;
 mod model;
 mod parser;
 mod process;
@@ -18,6 +23,7 @@ use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 use crate::model::{eval::Resolved, value::WithDisplayCtxExt};
+use log::blog;
 
 #[derive(clap::Parser, Debug)]
 #[command(name = "myapp")]
@@ -108,14 +114,15 @@ fn read_file(path: &PathBuf) -> String {
     match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            eprintln!(
+            blog!(error,
                 "Source file {} not found, consider passing --file or check that the file exists",
                 path.to_string_lossy()
             );
             std::process::exit(1);
         }
         Err(e) => {
-            eprintln!(
+            blog!(
+                error,
                 "Error reading build file {}: {e}",
                 path.to_string_lossy()
             );
@@ -125,6 +132,13 @@ fn read_file(path: &PathBuf) -> String {
 }
 
 fn main() {
+    if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    {
+        yansi::enable();
+    } else {
+        yansi::disable();
+    }
+
     let cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -172,7 +186,7 @@ fn main() {
             let target = match resolved.targets.find_by_string(&item) {
                 Ok(t) => t,
                 Err(e) => {
-                    eprintln!("{}", e);
+                    blog!(error, "{}", e);
                     std::process::exit(1)
                 }
             };
@@ -185,13 +199,14 @@ fn main() {
 
             match target.run(&resolved, &mut scheduler, &request) {
                 Err(e) => {
-                    eprintln!("Build failed:: {}", e);
+                    blog!(error, "Build failed:: {}", e);
                     std::process::exit(1)
                 }
                 Ok(res) => match res.value {
                     model::eval::Value::Unit => (),
                     _ => {
-                        println!(
+                        blog!(
+                            info,
                             "Build finished: {}",
                             res.value.with_ctx(&resolved)
                         )

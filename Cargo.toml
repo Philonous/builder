@@ -22,6 +22,7 @@ thiserror = "2.0.18"
 tokio = "1.52.3"
 tracing = "0.1.44"
 tracing-subscriber = {version= "0.3.23", features = ["env-filter"]}
+yansi = {version = "1.0.1", features = ["detect-tty", "detect-env"]}
 
 [dev-dependencies]
 insta = { version= "1.47.2", features=["glob", "yaml"] }
