@@ -10,7 +10,7 @@ use super::value::{RecordPattern, RecordSchemas, Value};
 use crate::error::{self, Spanned, WithSpan};
 use crate::log::blog;
 use crate::model::eval::RecordId;
-use crate::model::value::WithDisplayCtxExt;
+use crate::model::value::{DisplayWith, WithDisplayCtxExt};
 use database::{Database, DatabaseEntry};
 use lasso::Rodeo;
 use tracing;
@@ -64,6 +64,43 @@ pub enum TraceFun {
     },
 }
 
+pub enum DisplFun {
+    Builtin {
+        fmt: fn(
+            &record::Record,
+            &eval::Resolved,
+            &mut std::fmt::Formatter,
+        ) -> std::fmt::Result,
+    },
+}
+
+impl DisplFun {
+    pub fn fmt(
+        &self,
+        record: &record::Record,
+        resolved: &eval::Resolved,
+        f: &mut std::fmt::Formatter,
+    ) -> std::fmt::Result {
+        match self {
+            Self::Builtin { fmt } => fmt(record, resolved, f),
+        }
+    }
+}
+
+impl Default for DisplFun {
+    fn default() -> Self {
+        Self::Builtin {
+            fmt: |_, _, f| Ok(()),
+        }
+    }
+}
+
+impl std::fmt::Debug for DisplFun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<DisplFun>")
+    }
+}
+
 impl TraceFun {
     fn fast(
         &self,
@@ -106,6 +143,7 @@ pub struct TargetType {
     pub request_schema: RecordId,
     pub name_is: usize,
     pub trace: TraceFun,
+    pub display: DisplFun,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +199,7 @@ impl TargetTypes {
         request_fields: Parameters,
         name_is: usize,
         trace: TraceFun,
+        display: DisplFun,
     ) -> Result<TargetTypeId, Error> {
         let req_id = records
             .register(interner, request_name, request_fields)
@@ -172,6 +211,7 @@ impl TargetTypes {
             request_schema: req_id,
             name_is,
             trace,
+            display,
         });
         return Ok(TargetTypeId(self.0.len() - 1));
     }
@@ -230,6 +270,12 @@ const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
     },
 };
 
+const FILE_DISPL_FUN: DisplFun = DisplFun::Builtin {
+    fmt: |record, resolved, f| {
+        write!(f, "./{}", record.values[0].expect_string(resolved).unwrap())
+    },
+};
+
 pub fn register_target_type_file(
     interner: &mut Rodeo,
     records: &mut RecordSchemas,
@@ -246,8 +292,19 @@ pub fn register_target_type_file(
         request_parameters,
         0,
         FILE_TRACE_FUN,
+        FILE_DISPL_FUN,
     )
 }
+
+const TASK_DISPL_FUN: DisplFun = DisplFun::Builtin {
+    fmt: |record, resolved, f| {
+        write!(
+            f,
+            "task({})",
+            record.values[0].expect_string(resolved).unwrap()
+        )
+    },
+};
 
 pub fn register_target_type_task(
     interner: &mut Rodeo,
@@ -273,6 +330,7 @@ pub fn register_target_type_task(
             fast: |_, _| Ok(None),
             trace: |_, _| Ok(None),
         },
+        TASK_DISPL_FUN,
     )
 }
 
@@ -419,7 +477,12 @@ impl Target {
         request: &record::Record,
     ) -> Result<TargetResult, error::Spanned<eval::Error>> {
         let target_type = &resolved[self.kind];
-        let tgt = request.with_ctx(resolved).to_string();
+        let tgt = Request_ {
+            request,
+            target_type: self.kind,
+        }
+        .with_ctx(resolved)
+        .to_string();
 
         blog!(info, target = tgt, "Running target");
         tracing::error_span!("target", target = tgt);
@@ -619,6 +682,36 @@ pub struct Request {
     pub request: record::Record,
 }
 
+impl DisplayWith for Request {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        resolved: &eval::Resolved,
+    ) -> std::fmt::Result {
+        let target = &resolved[self.target];
+        let target_type = &resolved[target.kind];
+        target_type.display.fmt(&self.request, resolved, f)
+    }
+}
+
+// /For displaying targets
+pub struct Request_<'a> {
+    pub target_type: TargetTypeId,
+    pub request: &'a record::Record,
+}
+
+impl<'a> DisplayWith for Request_<'a> {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        resolved: &eval::Resolved,
+    ) -> std::fmt::Result {
+        resolved[self.target_type]
+            .display
+            .fmt(&self.request, resolved, f)
+    }
+}
+
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct Dependency {
     target: TargetId,
@@ -733,7 +826,7 @@ impl Scheduler {
                     .get_mut(&request.request)
                     // Entry must exist by construction
                     .expect("flush") = TargetState::Error;
-                let tgt = request.request.with_ctx(resolved).to_string();
+                let tgt = request.with_ctx(resolved).to_string();
                 blog!(error, target = tgt, "Target failed with: {e}");
                 Err(eval::Error::DependencyError(tgt))
             }

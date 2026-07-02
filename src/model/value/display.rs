@@ -1,23 +1,26 @@
 use std::fmt;
 
-use crate::model::value::RecordSchemas;
+use crate::model::{eval::Resolved, value::RecordSchemas};
 
 #[derive(Clone, Copy)]
 pub struct DisplayCtx<'a> {
-    pub resolver: &'a lasso::RodeoResolver,
-    pub records: &'a RecordSchemas,
+    pub resolved: &'a Resolved,
 }
 
 // Things that can be displayed given the context
 pub trait DisplayWith {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: DisplayCtx) -> fmt::Result;
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        resolved: &Resolved,
+    ) -> fmt::Result;
 }
 
 pub struct WithCtx<'a, T: ?Sized>(&'a T, DisplayCtx<'a>);
 
 impl<T: DisplayWith + ?Sized> fmt::Display for WithCtx<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f, self.1)
+        self.0.fmt(f, self.1.resolved)
     }
 }
 

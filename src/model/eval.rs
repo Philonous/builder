@@ -368,18 +368,11 @@ pub struct EvalContext<'a> {
     pub outstanding: &'a mut Vec<target::Request>,
 }
 
-impl<'a> Into<DisplayCtx<'a>> for &'a Resolved {
-    fn into(self) -> DisplayCtx<'a> {
-        DisplayCtx {
-            resolver: &self.resolver,
-            records: &self.records,
-        }
-    }
-}
-
 impl<'a> Into<DisplayCtx<'a>> for &'a EvalContext<'a> {
     fn into(self) -> DisplayCtx<'a> {
-        self.resolved.into()
+        DisplayCtx {
+            resolved: &self.resolved,
+        }
     }
 }
 
@@ -390,6 +383,12 @@ pub struct Resolved<R = RodeoResolver> {
     pub records: RecordSchemas,
     pub target_types: TargetTypes,
     pub targets: Targets,
+}
+
+impl<'a> Into<DisplayCtx<'a>> for &'a Resolved {
+    fn into(self) -> DisplayCtx<'a> {
+        DisplayCtx { resolved: self }
+    }
 }
 
 impl<'a> EvalContext<'a> {

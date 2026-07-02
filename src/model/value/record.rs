@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use lasso::Rodeo;
 
-use crate::model::eval::RecordId;
+use crate::model::eval::{RecordId, Resolved};
 use crate::model::value::display::WithDisplayCtxExt as _;
 use crate::model::value::{DisplayCtx, DisplayWith};
 
@@ -82,16 +82,30 @@ pub struct Record {
 }
 
 impl<'a> DisplayWith for Record {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>, ctx: DisplayCtx) -> std::fmt::Result {
-        let schema = &ctx.records[self.schema];
-        schema.name.with_ctx(ctx).fmt(f)?;
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        resolved: &Resolved,
+    ) -> std::fmt::Result {
+        let schema = &resolved[self.schema];
+        schema.name.with_ctx(resolved).fmt(f)?;
         write!(f, "(")?;
         let mut it = schema.fields.0.iter().zip(self.values.iter());
         if let Some(((name, _param), value)) = it.next() {
-            write!(f, "{}={}", name.with_ctx(ctx), value.with_ctx(ctx))?;
+            write!(
+                f,
+                "{}={}",
+                name.with_ctx(resolved),
+                value.with_ctx(resolved)
+            )?;
 
             for ((name, param), value) in it {
-                write!(f, ", {}={}", name.with_ctx(ctx), value.with_ctx(ctx))?;
+                write!(
+                    f,
+                    ", {}={}",
+                    name.with_ctx(resolved),
+                    value.with_ctx(resolved)
+                )?;
             }
             write!(f, ")")?;
         }

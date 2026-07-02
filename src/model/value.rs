@@ -19,8 +19,8 @@ impl Default for Ident {
 }
 
 impl DisplayWith for Ident {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: DisplayCtx) -> fmt::Result {
-        write!(f, "{}", ctx.resolver.resolve(&self.0))
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Resolved) -> fmt::Result {
+        write!(f, "{}", &ctx[*self])
     }
 }
 
@@ -62,7 +62,10 @@ impl Value {
         }
     }
 
-    pub fn expect_string(&self, resolved: &Resolved) -> Result<&str, eval::Error> {
+    pub fn expect_string(
+        &self,
+        resolved: &Resolved,
+    ) -> Result<&str, eval::Error> {
         match self {
             Self::String(s) => Ok(&s),
             _ => Err(eval::Error::TypeError {
@@ -72,7 +75,10 @@ impl Value {
         }
     }
 
-    pub fn expect_record(&self, resolved: &Resolved) -> Result<&Record, eval::Error> {
+    pub fn expect_record(
+        &self,
+        resolved: &Resolved,
+    ) -> Result<&Record, eval::Error> {
         match self {
             Self::Record(r) => Ok(&r),
             _ => Err(eval::Error::TypeError {
@@ -84,7 +90,7 @@ impl Value {
 }
 
 impl DisplayWith for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: DisplayCtx) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Resolved) -> fmt::Result {
         match self {
             Value::Unit => write!(f, "()"),
             Value::String(s) => write!(f, "{}", s),
