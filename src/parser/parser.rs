@@ -3,7 +3,8 @@ use chumsky::input::Stream;
 use chumsky::{input::ValueInput, prelude::*};
 
 use super::lexer::{
-    command, normal, string, CommandToken, NormalToken, StringToken, Token, Tokenizer,
+    command, normal, string, CommandToken, NormalToken, StringToken, Token,
+    Tokenizer,
 };
 use super::string::Quoted;
 
@@ -51,20 +52,16 @@ impl<'a> MaybeQuoted<'a> {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct Command<S: Clone + PartialEq + std::fmt::Debug> {
-    pub executable: S,
-    pub args: Vec<S>,
+pub enum CommandPart<'a> {
+    BareString(Spanned<&'a str>),
+    String(StringExpr<'a>),
+    Splice(Spanned<Ident<'a>>),
 }
 
-impl<'a> Command<MaybeQuoted<'a>> {
-    pub fn resolve_strings(self) -> Result<Command<String>, QuoteError> {
-        let executable = self.executable.resolve()?;
-        let mut args = Vec::with_capacity(self.args.len());
-        for part in &self.args {
-            args.push(part.resolve()?);
-        }
-        Ok(Command { executable, args })
-    }
+#[derive(Clone, PartialEq, Debug)]
+pub struct Command<'a> {
+    pub executable: CommandPart<'a>,
+    pub args: Vec<CommandPart<'a>>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -79,7 +76,8 @@ impl<'tok> Argument<'tok> {
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
-        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>> + Clone,
+        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>>
+            + Clone,
     {
         Ident::parse()
             .then_ignore(just(normal!(Equals)))
@@ -98,7 +96,8 @@ impl<'tok> Arguments<'tok> {
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
-        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>> + Clone,
+        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>>
+            + Clone,
     {
         Argument::parse(expr)
             .spanned()
@@ -111,7 +110,7 @@ impl<'tok> Arguments<'tok> {
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum StringExprPart<'a> {
-    Lit(Quoted<'a>),
+    Lit(Spanned<Quoted<'a>>),
     Splice(Spanned<Ident<'a>>),
 }
 
@@ -126,7 +125,7 @@ pub enum ExprKind<'a> {
     Lit(Lit<'a>),
     String(StringExpr<'a>),
     Ident(Ident<'a>),
-    Command(Command<MaybeQuoted<'a>>),
+    Command(Command<'a>),
     FunApp(Ident<'a>, Spanned<Arguments<'a>>),
     Need(NeedExpr<'a>),
 }
@@ -313,18 +312,29 @@ impl<'tok> Lit<'tok> {
     }
 }
 
-impl<'tok> Command<MaybeQuoted<'tok>> {
+impl<'tok> Command<'tok> {
     fn parse<'src: 'tok, I>(
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        let part = select! {
-            command!(UnquotedString(s)) => MaybeQuoted::Unquoted(s),
-            command!(QuotedString(s)) => MaybeQuoted::Quoted(s)
-        };
-        part.then(part.repeated().collect::<Vec<_>>())
-            .delimited_by(just(normal!(CommandStart)), just(command!(CommandEnd)))
+        let part = (select! {
+            command!(UnquotedString(s)) = tok =>
+                CommandPart::BareString(
+                    Spanned
+                      { span: tok.span()
+                      , inner: s
+                      }),
+            command!(SpliceIdent(id)) = tok =>
+                CommandPart::Splice(Spanned { span: tok.span(), inner: Ident(id)})
+        })
+            .or(just(command!(StringStart)).ignore_then(StringExpr::parse().map(CommandPart::String)));
+        part.clone()
+            .then(part.repeated().collect::<Vec<_>>())
+            .delimited_by(
+                just(normal!(CommandStart)),
+                just(command!(CommandEnd)),
+            )
             .map(|(executable, args)| Command { executable, args })
             .labelled("command")
     }
@@ -337,13 +347,14 @@ impl<'tok> StringExpr<'tok> {
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
         select! {
-            string!(LitPart(s)) => StringExprPart::Lit(s),
+            string!(LitPart(s)) = tok =>
+              StringExprPart::Lit(Spanned{span: tok.span(), inner: s}),
             string!(SpliceIdent(s)) = tok =>
               StringExprPart::Splice(Spanned{ inner: Ident(s), span: tok.span()})
         }
         .repeated()
         .collect()
-        .delimited_by(just(normal!(StringStart)), just(string!(StringEnd)))
+        .then_ignore(just(string!(StringEnd)))
         .map(Self)
     }
 }
@@ -354,7 +365,8 @@ impl<'tok> NeedExpr<'tok> {
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
-        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>> + Clone,
+        E: Parser<'tok, I, Expr<'tok>, extra::Err<Rich<'tok, Token<'src>>>>
+            + Clone,
     {
         just(normal!(Need))
             .ignore_then(expr.parenthesized())
@@ -380,7 +392,8 @@ impl<'tok> Expr<'tok> {
                 .or(Lit::parse().map(ExprKind::Lit))
                 .or(Ident::parse().map(ExprKind::Ident))
                 // This has to come after Lit because they overlap
-                .or(StringExpr::parse().map(ExprKind::String))
+                .or(just(normal!(StringStart))
+                    .ignore_then(StringExpr::parse().map(ExprKind::String)))
                 .spanned()
                 .map(Expr)
         })
@@ -443,11 +456,12 @@ impl<'tok> Decl<'tok> {
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        let target_header = select! {normal!(Ident("target")) => ()}.ignore_then(
-            LitArguments::parse()
-                .or_not()
-                .map(|args| args.unwrap_or_default()),
-        );
+        let target_header = select! {normal!(Ident("target")) => ()}
+            .ignore_then(
+                LitArguments::parse()
+                    .or_not()
+                    .map(|args| args.unwrap_or_default()),
+            );
         let target = target_header
             .then(TargetIdent::parse())
             .then(Block::parse())
@@ -470,7 +484,9 @@ impl<'tok> Ast<'tok> {
     }
 }
 
-pub fn parse_str<'a>(src: &'a str) -> Result<Ast<'a>, Vec<chumsky::error::Rich<'a, Token<'a>>>> {
+pub fn parse_str<'a>(
+    src: &'a str,
+) -> Result<Ast<'a>, Vec<chumsky::error::Rich<'a, Token<'a>>>> {
     let token_iter = Tokenizer::new(src)
         // Convert logos errors into tokens. We want parsing to be recoverable and not fail at the lexing stage, so
         // we have a dedicated `Token::Error` variant that represents a token error that was previously encountered

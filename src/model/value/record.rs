@@ -4,7 +4,7 @@ use lasso::Rodeo;
 
 use crate::model::eval::{RecordId, Resolved};
 use crate::model::value::display::WithDisplayCtxExt as _;
-use crate::model::value::{DisplayCtx, DisplayWith};
+use crate::model::value::DisplayWith;
 
 use super::super::parameters::{Parameters, Patterns};
 use super::Ident;

@@ -41,8 +41,6 @@ pub enum NormalToken<'a> {
     Underscore,
 
     // Literals
-
-    // Taken from https://logos.maciej.codes/examples/json.html
     #[regex(r#"""#)]
     StringStart,
 
@@ -90,9 +88,13 @@ impl fmt::Display for NormalToken<'_> {
 pub enum CommandToken<'a> {
     #[regex(r#"[^ `\"$\t\r\n\f]+"#)]
     UnquotedString(&'a str),
-    #[regex(r#""([^"\\\x00-\x1F]|\\(["\\bnfrt/]|u[a-fA-F0-9]{4}))*""#,
-        |s| Quoted{raw: s.slice(), delim: '"'})]
-    QuotedString(Quoted<'a>),
+
+    #[regex(r#"\{[[:space:]]*[a-zA-Z][a-zA-Z/_-]+[[:space:]]*\}"#, |lex| splice_name(lex.slice()))]
+    SpliceIdent(&'a str),
+
+    #[regex(r#"""#)]
+    StringStart,
+
     #[token("`")]
     CommandEnd,
 }
@@ -101,10 +103,11 @@ impl fmt::Display for CommandToken<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::UnquotedString(s) => write!(f, "{s}"),
-            Self::QuotedString(s) => {
-                let sraw = s.raw;
-                write!(f, "{sraw}")
+
+            Self::SpliceIdent(s) => {
+                write!(f, "{{{s}}}")
             }
+            Self::StringStart => write!(f, "quotation mark"),
             Self::CommandEnd => Ok(()),
         }
     }
@@ -139,7 +142,7 @@ impl fmt::Display for StringToken<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             StringToken::LitPart(s) => write!(f, "{}", s),
-            StringToken::SpliceIdent(s) => write!(f, "${{{}}}", s),
+            StringToken::SpliceIdent(s) => write!(f, "{{{}}}", s),
             StringToken::StringEnd => write!(f, "\""),
         }
     }
@@ -302,6 +305,7 @@ impl<'a> Iterator for Tokenizer<'a> {
             LexerState::Command(mut lexer) => advance!(
                 self, lexer,
                 state Command, wrap Command,
+                on CommandToken::StringStart => (enter String),
                 on CommandToken::CommandEnd => (leave)
             ),
             LexerState::Taken => unreachable!("Taken seen between next calls"),

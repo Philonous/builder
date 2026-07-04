@@ -37,7 +37,7 @@ pub enum Error {
     DatabaseError,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Var {
     // How many nested contexts up (0 is current)
     pub nesting: usize,
@@ -134,8 +134,8 @@ pub enum ExprKind {
         fields: Vec<Expr>,
     },
     Command {
-        executable: String,
-        args: Vec<String>,
+        executable: Box<Expr>,
+        args: Vec<Expr>,
     },
     #[default]
     Unit,
@@ -208,9 +208,28 @@ impl Expr {
             ExprKind::Command { executable, args } => {
                 // Commands can see effects of targets, so we need to flush
                 ctx.flush_dependencies().without_span()?;
+                let executable = executable
+                    .eval(ctx)?
+                    .force(ctx)
+                    .with_opt_span(self.span)?
+                    .expect_string(ctx.resolved)
+                    .with_opt_span(self.span)?
+                    .to_owned();
+
                 let cmd = command::Command {
-                    executable: executable.clone(),
-                    args: args.clone(),
+                    executable,
+                    args: args
+                        .into_iter()
+                        .map(|arg| {
+                            Ok(arg
+                                .eval(ctx)?
+                                .force(ctx)
+                                .with_opt_span(self.span)?
+                                .with_ctx(&*ctx)
+                                .to_string()
+                                .to_owned())
+                        })
+                        .collect::<Result<_, _>>()?,
                 };
                 cmd.exe().with_span_from(self.span)?;
                 Value::Unit.into()

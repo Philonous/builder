@@ -298,11 +298,7 @@ pub fn register_target_type_file(
 
 const TASK_DISPL_FUN: DisplFun = DisplFun::Builtin {
     fmt: |record, resolved, f| {
-        write!(
-            f,
-            "task({})",
-            record.values[0].expect_string(resolved).unwrap()
-        )
+        write!(f, ":{}", record.values[0].expect_string(resolved).unwrap())
     },
 };
 
@@ -484,7 +480,6 @@ impl Target {
         .with_ctx(resolved)
         .to_string();
 
-        blog!(info, target = tgt, "Running target");
         tracing::error_span!("target", target = tgt);
 
         let before_trace =
@@ -519,7 +514,7 @@ impl Target {
             // Nothing cached, continue
             _ => {}
         };
-
+        blog!(info, target = tgt, "Starting");
         let (value, dependencies) =
             match self.execute(resolved, scheduler, request) {
                 Ok((v, dependencies)) => (v, dependencies),

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::model::{eval::Resolved, value::RecordSchemas};
+use crate::model::eval::Resolved;
 
 #[derive(Clone, Copy)]
 pub struct DisplayCtx<'a> {
