@@ -71,6 +71,7 @@ impl Value {
             _ => Err(eval::Error::TypeError {
                 expected: Type::String,
                 found: self.type_of(),
+                display_value: self.with_ctx(resolved).to_string(),
             }),
         }
     }
@@ -84,6 +85,7 @@ impl Value {
             _ => Err(eval::Error::TypeError {
                 expected: Type::Record,
                 found: self.type_of(),
+                display_value: self.with_ctx(resolved).to_string(),
             }),
         }
     }

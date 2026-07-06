@@ -7,7 +7,7 @@ use super::parameters::{Parameter, Parameters};
 use super::value::record;
 use super::value::Ident;
 use super::value::{RecordPattern, RecordSchemas, Value};
-use crate::error::{self, Spanned, WithSpan};
+use crate::error::{self, AddErrors, Spanned, WithSpan};
 use crate::log::blog;
 use crate::model::eval::RecordId;
 use crate::model::value::{DisplayWith, WithDisplayCtxExt};
@@ -466,7 +466,7 @@ impl Target {
         Ok(true)
     }
 
-    pub fn run(
+    fn run(
         &self,
         resolved: &eval::Resolved,
         scheduler: &mut Scheduler,
@@ -668,10 +668,10 @@ enum TargetState {
     Requested,
     Running,
     Done(TargetResult),
-    Error,
+    Error(Spanned<eval::Error>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Request {
     pub target: TargetId,
     pub request: record::Record,
@@ -761,7 +761,7 @@ impl Scheduler {
                 ))
                 .without_span()
             }
-            Some(TargetState::Error) => {
+            Some(TargetState::Error(_)) => {
                 tracing::trace!(
                     "Target {:?} had already finished with an error",
                     request
@@ -794,7 +794,7 @@ impl Scheduler {
             .expect("find_result on resource that has not be scheduled")
         {
             TargetState::Done(v) => Ok(Some(v.clone())),
-            TargetState::Error => Err(eval::Error::DependencyError(
+            TargetState::Error(_) => Err(eval::Error::DependencyError(
                 request.with_ctx(resolved).to_string(),
             )),
             TargetState::Requested | TargetState::Running => Ok(None),
@@ -816,13 +816,13 @@ impl Scheduler {
                 Ok(res)
             }
             Err(e) => {
+                let tgt = request.with_ctx(resolved).to_string();
+                blog!(error, target = tgt, "Target failed with: {e}");
                 *self
                     .requested
                     .get_mut(&request.request)
                     // Entry must exist by construction
-                    .expect("flush") = TargetState::Error;
-                let tgt = request.with_ctx(resolved).to_string();
-                blog!(error, target = tgt, "Target failed with: {e}");
+                    .expect("flush") = TargetState::Error(e);
                 Err(eval::Error::DependencyError(tgt))
             }
         }
@@ -842,5 +842,50 @@ impl Scheduler {
             // Target still outstanding, run
             None => Ok(self.run_one(resolved, request)?),
         }
+    }
+
+    // Entrypoint for main
+    pub fn demand_all(
+        &mut self,
+        resolved: &eval::Resolved,
+        recs: &[record::Record],
+    ) -> Result<Vec<Value>, error::Errors<eval::Error>> {
+        let mut errors: error::Errors<eval::Error> = error::Errors::empty();
+        let mut requests = Vec::with_capacity(recs.len());
+        for r in recs.iter() {
+            self.add(resolved, r).add_errors(&mut errors).map(|target| {
+                requests.push(Request {
+                    target,
+                    request: r.clone(),
+                })
+            });
+        }
+        errors.ok(())?;
+
+        let mut res = Vec::with_capacity(requests.len());
+        for r in requests.into_iter() {
+            let _ = self
+                .demand(resolved, r)
+                .without_span()
+                .map(|v| res.push(v.value));
+        }
+
+        // Collect all errors from all targets including dependencies
+        let errors = error::Errors(
+            std::mem::take(&mut self.requested)
+                .into_values()
+                .filter_map(|st| match st {
+                    TargetState::Error(e) => Some(e),
+                    TargetState::Requested => unreachable!(
+                        "target in requested state after demand_all"
+                    ),
+                    TargetState::Running => {
+                        unreachable!("target in running state after demand_all")
+                    }
+                    TargetState::Done(_) => None,
+                })
+                .collect(),
+        );
+        errors.ok(res)
     }
 }

@@ -129,6 +129,10 @@ impl<E> Errors<E> {
             Ok(v)
         }
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Spanned<E>> {
+        self.0.iter()
+    }
 }
 
 pub trait IntoErrors<E> {

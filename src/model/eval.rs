@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use lasso::Rodeo;
 use lasso::RodeoResolver;
 
@@ -21,8 +23,14 @@ pub enum Error {
     UninitVariable(String),
     #[error("Variable {0} declared twice in the same block")]
     DoubleDeclare(String),
-    #[error("Type error, expected {expected}, found {found}")]
-    TypeError { expected: Type, found: Type },
+    #[error(
+        "Type error, expected a {expected}, but value {display_value} is of type {found}"
+    )]
+    TypeError {
+        expected: Type,
+        found: Type,
+        display_value: String,
+    },
     #[error("{0}")]
     IOError(#[from] std::io::Error),
     #[error("Circular dependency in target {0}")]
@@ -211,9 +219,9 @@ impl Expr {
                 let executable = executable
                     .eval(ctx)?
                     .force(ctx)
-                    .with_opt_span(self.span)?
+                    .with_opt_span(executable.span)?
                     .expect_string(ctx.resolved)
-                    .with_opt_span(self.span)?
+                    .with_opt_span(executable.span)?
                     .to_owned();
 
                 let cmd = command::Command {
@@ -224,9 +232,9 @@ impl Expr {
                             Ok(arg
                                 .eval(ctx)?
                                 .force(ctx)
-                                .with_opt_span(self.span)?
-                                .with_ctx(&*ctx)
-                                .to_string()
+                                .with_opt_span(arg.span)?
+                                .expect_string(ctx.resolved)
+                                .with_opt_span(arg.span)?
                                 .to_owned())
                         })
                         .collect::<Result<_, _>>()?,

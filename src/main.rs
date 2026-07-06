@@ -22,7 +22,7 @@ use model::target::database::Database;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
-use crate::model::{eval::Resolved, value::WithDisplayCtxExt};
+use crate::model::{eval::Resolved, target::Request, value::WithDisplayCtxExt};
 use log::blog;
 
 #[derive(clap::Parser, Debug)]
@@ -197,22 +197,21 @@ fn main() {
 
             let mut scheduler = model::target::Scheduler::new(database);
 
-            match target.run(&resolved, &mut scheduler, &request) {
+            match scheduler.demand_all(&resolved, &vec![request]) {
                 Err(e) => {
-                    blog!(error, "Build failed:: {}", e);
+                    let source = Source::from(src.as_ref());
+                    blog!(error, "Build failed");
+                    for err in e.iter() {
+                        error::report(err)
+                            .print(&source)
+                            .expect("ariadne: print error");
+                    }
                     std::process::exit(1)
                 }
-                Ok(res) => match res.value {
-                    model::eval::Value::Unit => (),
-                    _ => {
-                        blog!(
-                            info,
-                            "Build finished: {}",
-                            res.value.with_ctx(&resolved)
-                        )
-                    }
-                },
-            }
+                Ok(res) => {
+                    blog!(info, "Build finished");
+                }
+            };
         }
         Command::Targets => {
             let ast = parse(&src);
