@@ -5,7 +5,7 @@ pub mod serialize;
 use std::fmt;
 
 use super::eval::{self, Resolved};
-pub use display::{DisplayCtx, DisplayWith, WithDisplayCtxExt};
+pub use display::{DisplayWith, WithDisplayCtxExt};
 use lasso::Spur;
 pub use record::{Record, RecordPattern, RecordSchema, RecordSchemas};
 

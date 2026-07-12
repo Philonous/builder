@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use super::eval;
 use super::parameters::{Parameter, Parameters};
@@ -56,14 +57,17 @@ pub enum TraceFun {
         fast: fn(
             &record::Record,
             &eval::Resolved,
+            &Path,
         ) -> Result<Option<FastTrace>, eval::Error>,
         trace: fn(
             &record::Record,
             &eval::Resolved,
+            &Path,
         ) -> Result<Option<Trace>, eval::Error>,
     },
 }
 
+// Function for displaying the target (e.g. special syntax for files or tasks)
 pub enum DisplFun {
     Builtin {
         fmt: fn(
@@ -90,7 +94,7 @@ impl DisplFun {
 impl Default for DisplFun {
     fn default() -> Self {
         Self::Builtin {
-            fmt: |_, _, f| Ok(()),
+            fmt: |_, _, _f| Ok(()),
         }
     }
 }
@@ -106,18 +110,22 @@ impl TraceFun {
         &self,
         resolved: &eval::Resolved,
         request: &record::Record,
+        workdir: &Path,
     ) -> Result<Option<FastTrace>, eval::Error> {
         match self {
-            TraceFun::Builtin { fast, .. } => fast(request, resolved),
+            TraceFun::Builtin { fast, .. } => fast(request, resolved, workdir),
         }
     }
     fn trace(
         &self,
         resolved: &eval::Resolved,
         request: &record::Record,
+        workdir: &Path,
     ) -> Result<Option<Trace>, eval::Error> {
         match self {
-            TraceFun::Builtin { trace, .. } => trace(request, resolved),
+            TraceFun::Builtin { trace, .. } => {
+                trace(request, resolved, workdir)
+            }
         }
     }
 }
@@ -125,8 +133,8 @@ impl TraceFun {
 impl Default for TraceFun {
     fn default() -> Self {
         TraceFun::Builtin {
-            fast: |_, _| Ok(None),
-            trace: |_, _| Ok(None),
+            fast: |_, _, _| Ok(None),
+            trace: |_, _, _| Ok(None),
         }
     }
 }
@@ -231,8 +239,8 @@ impl TargetTypes {
 }
 
 const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
-    fast: |rec, resolved| {
-        let path = rec.values[0].expect_string(resolved)?;
+    fast: |rec, resolved, workdir| {
+        let path = workdir.join(rec.values[0].expect_string(resolved)?);
         let meta = match std::fs::metadata(path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -252,9 +260,9 @@ const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
             ),
         }))
     },
-    trace: |rec, resolved| {
-        let path = rec.values[0].expect_string(resolved)?;
-        let file = match std::fs::File::open(path) {
+    trace: |rec, resolved, workdir| {
+        let path = workdir.join(rec.values[0].expect_string(resolved)?);
+        let file = match std::fs::File::open(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(None)
@@ -265,7 +273,11 @@ const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
             &std::fs::File,
             false,
         >(&file, &rapidhash::v3::DEFAULT_RAPID_SECRETS)?;
-        tracing::debug!("trace fun hashed file {}: {:X}", path, hash);
+        tracing::debug!(
+            "trace fun hashed file {}: {:X}",
+            path.to_string_lossy(),
+            hash
+        );
         Ok(Some(Trace { hash }))
     },
 };
@@ -323,8 +335,8 @@ pub fn register_target_type_task(
         0,
         // Tasks don't have traces
         TraceFun::Builtin {
-            fast: |_, _| Ok(None),
-            trace: |_, _| Ok(None),
+            fast: |_, _, _| Ok(None),
+            trace: |_, _, _| Ok(None),
         },
         TASK_DISPL_FUN,
     )
@@ -344,6 +356,7 @@ pub struct Target {
     // into slot i
     pub matchers: Vec<usize>,
     pub block: eval::Block,
+    pub workdir: PathBuf,
 }
 
 // List of independent dependencies (each group can be run in parallel)
@@ -391,6 +404,7 @@ impl Target {
                 scheduler,
                 dependencies: &mut dependencies,
                 outstanding: &mut outstanding,
+                cwd: self.workdir.as_ref(),
             };
             // Fill in variables with record elements
             let mut slots = self.slots.clone();
@@ -482,8 +496,10 @@ impl Target {
 
         tracing::error_span!("target", target = tgt);
 
-        let before_trace =
-            target_type.trace.trace(resolved, &request).without_span()?;
+        let before_trace = target_type
+            .trace
+            .trace(resolved, &request, &self.workdir)
+            .without_span()?;
 
         let cached = scheduler.database.get(request).cloned();
 
@@ -553,8 +569,10 @@ impl Target {
 
         // TODO: Make use of fast trace
         // let fast_trace = target_type.trace.fast(resolved, &request).without_span()?;
-        let after_trace =
-            target_type.trace.trace(resolved, &request).without_span()?;
+        let after_trace = target_type
+            .trace
+            .trace(resolved, &request, &self.workdir)
+            .without_span()?;
 
         scheduler
             .database
@@ -632,7 +650,7 @@ impl Targets {
             .0
             .iter()
             .enumerate()
-            .filter(|(ix, target)| target.pattern.matches(request))
+            .filter(|(_ix, target)| target.pattern.matches(request))
             .collect::<Vec<_>>();
 
         // Find the most specific target

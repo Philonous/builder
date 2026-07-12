@@ -37,21 +37,6 @@ impl<'a> std::fmt::Display for Lit<'a> {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum MaybeQuoted<'a> {
-    Unquoted(&'a str),
-    Quoted(Quoted<'a>),
-}
-
-impl<'a> MaybeQuoted<'a> {
-    fn resolve(&self) -> Result<String, QuoteError> {
-        Ok(match self {
-            Self::Unquoted(s) => String::from(*s),
-            Self::Quoted(q) => q.unquote()?,
-        })
-    }
-}
-
-#[derive(Clone, PartialEq, Debug)]
 pub enum CommandPart<'a> {
     BareString(Spanned<&'a str>),
     String(StringExpr<'a>),

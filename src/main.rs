@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::{ErrorKind, IsTerminal},
+    path::Path,
     sync::Arc,
 };
 
@@ -22,7 +23,7 @@ use model::target::database::Database;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
-use crate::model::{eval::Resolved, target::Request, value::WithDisplayCtxExt};
+use crate::model::eval::Resolved;
 use log::blog;
 
 #[derive(clap::Parser, Debug)]
@@ -31,6 +32,9 @@ struct Cli {
     /// Optional input file; valid before or after the command.
     #[arg(short, long, global = true, value_name = "PATH")]
     file: Option<PathBuf>,
+
+    #[arg(short, long, global = true, value_name = "PATH")]
+    working_dir: Option<PathBuf>,
 
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
@@ -96,8 +100,9 @@ fn parse(src: &str) -> parser::parser::Ast<'_> {
 fn resolve<'a>(
     src: &'a str,
     ast: parser::parser::Ast<'a>,
+    workdir: &Path,
 ) -> Resolved<lasso::Rodeo> {
-    match ast.resolve() {
+    match ast.resolve(workdir) {
         Ok(decls) => decls,
         Err(error::Errors(errs)) => {
             for err in errs {
@@ -154,15 +159,27 @@ fn main() {
 
     match cli.command {
         Command::Check => {
+            let cwd = match cli.working_dir {
+                None => std::env::current_dir(),
+                Some(working_dir) => std::path::absolute(working_dir),
+            }
+            .expect("cwd");
+
             let ast = parse(&src);
-            let _ = resolve(&src, ast);
+            let _ = resolve(&src, ast, &cwd);
             println!("Source file {:?} checked without errors", &file);
         }
         Command::Run { item } => {
+            let cwd = match cli.working_dir {
+                None => std::env::current_dir(),
+                Some(working_dir) => std::path::absolute(working_dir),
+            }
+            .expect("cwd");
+
             let ast = parse(&src);
-            let mut resolved = resolve(&src, ast);
+            let mut resolved = resolve(&src, ast, &cwd);
             let (mut database, needs_compaction) = Database::load(
-                "build.db",
+                cwd.join("build.db"),
                 true,
                 &mut resolved.resolver,
                 &resolved.records,
@@ -208,14 +225,19 @@ fn main() {
                     }
                     std::process::exit(1)
                 }
-                Ok(res) => {
+                Ok(_res) => {
                     blog!(info, "Build finished");
                 }
             };
         }
         Command::Targets => {
+            let cwd = match cli.working_dir {
+                None => std::env::current_dir(),
+                Some(working_dir) => std::path::absolute(working_dir),
+            }
+            .expect("cwd");
             let ast = parse(&src);
-            let resolved = resolve(&src, ast);
+            let resolved = resolve(&src, ast, &cwd);
             for name in resolved.targets.names() {
                 println!("{:?}", name);
             }
@@ -235,8 +257,13 @@ fn main() {
         }
 
         Command::Dump => {
+            let cwd = match cli.working_dir {
+                None => std::env::current_dir(),
+                Some(working_dir) => std::path::absolute(working_dir),
+            }
+            .expect("cwd");
             let ast = parse(&src);
-            let decls = resolve(&src, ast);
+            let decls = resolve(&src, ast, &cwd);
             println!("{:?}", decls)
         }
     }

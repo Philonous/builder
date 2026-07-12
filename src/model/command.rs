@@ -1,6 +1,9 @@
+use std::path::PathBuf;
+
 pub struct Command {
     pub executable: String,
     pub args: Vec<String>,
+    pub workdir: PathBuf,
 }
 
 impl<'a> std::fmt::Display for Command {
@@ -24,6 +27,7 @@ pub enum Error {
 impl<'a> Command {
     pub fn exe(&self) -> Result<(), Error> {
         let mut proc = std::process::Command::new(&*self.executable);
+        proc.current_dir(&self.workdir);
         // Add arguments
         for arg in &self.args {
             proc.arg(&**arg);

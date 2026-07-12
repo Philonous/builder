@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use lasso::{Interner, Resolver, Rodeo};
 
 use super::model::{eval, parameters, target};
@@ -156,6 +158,7 @@ pub struct Ctx<'fs> {
     pub functions: &'fs Functions,
     pub records: &'fs RecordSchemas,
     pub target_types: &'fs TargetTypes,
+    pub workdir: &'fs Path,
     // todo: constants
 }
 
@@ -612,6 +615,7 @@ impl<'a> parser::Decl<'a> {
             block,
             slots,
             matchers,
+            workdir: ctx.workdir.to_owned(),
         };
 
         errors.ok(target)
@@ -724,7 +728,10 @@ fn register_builtin_target_types(
 }
 
 impl<'a> parser::Ast<'a> {
-    pub fn resolve(self) -> Result<eval::Resolved<Rodeo>, Errors<Error>> {
+    pub fn resolve(
+        self,
+        workdir: &'a Path,
+    ) -> Result<eval::Resolved<Rodeo>, Errors<Error>> {
         let mut errors = Errors::empty();
 
         let mut interner = Rodeo::new();
@@ -747,6 +754,7 @@ impl<'a> parser::Ast<'a> {
             functions: &functions,
             records: &records,
             target_types: &target_types,
+            workdir,
         };
         for decl in self.decls {
             let t = decl

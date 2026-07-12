@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::path::Path;
 
 use lasso::Rodeo;
 use lasso::RodeoResolver;
@@ -238,6 +238,7 @@ impl Expr {
                                 .to_owned())
                         })
                         .collect::<Result<_, _>>()?,
+                    workdir: ctx.cwd.to_owned(),
                 };
                 cmd.exe().with_span_from(self.span)?;
                 Value::Unit.into()
@@ -393,6 +394,9 @@ pub struct EvalContext<'a> {
     pub scheduler: &'a mut target::Scheduler,
     pub dependencies: &'a mut target::Dependencies,
     pub outstanding: &'a mut Vec<target::Request>,
+    // Working dir relative to which we are working (since process cwd
+    // can't be changed)
+    pub cwd: &'a Path,
 }
 
 impl<'a> Into<DisplayCtx<'a>> for &'a EvalContext<'a> {
@@ -427,6 +431,7 @@ impl<'a> EvalContext<'a> {
             scheduler: self.scheduler,
             dependencies: self.dependencies,
             outstanding: self.outstanding,
+            cwd: self.cwd,
         }
     }
 
@@ -495,7 +500,7 @@ impl<'a> EvalContext<'a> {
         let slot = &(&self.variables[ix].0)[var.slot];
         match &slot.value {
             // The analyser should not allow this to happen,
-            // presuambly this should be a panic instead. TODO: check
+            // presumably this should be a panic instead. TODO: check
             SlotState::Uninitialised => {
                 tracing::error!("Uninitialised variable {:?}", var);
                 Err(Error::UninitVariable(
@@ -692,8 +697,12 @@ pub fn builtin_fun_write_file(interner: &mut Rodeo) -> Fun {
             [path, val] => {
                 let path = path.force(ctx)?;
                 let path = path.expect_string(ctx.resolved)?;
+                let real_path = ctx.cwd.join(path);
                 let val = val.force(ctx)?;
-                std::fs::write(path, val.with_ctx(ctx.resolved).to_string())?;
+                std::fs::write(
+                    real_path,
+                    val.with_ctx(ctx.resolved).to_string(),
+                )?;
 
                 Ok(Value::Unit)
             }
