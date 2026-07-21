@@ -3,8 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::error::{self};
+use crate::model::eval::RecordId;
 use crate::model::parameters::Arguments;
-use crate::model::value::{Ident, Record, RecordSchemas};
+use crate::model::value::{Ident, Record, RecordSchema, RecordSchemas};
 use crate::{
     model::{
         eval::{Resolved, Value},
@@ -24,6 +25,37 @@ pub enum Error {
     Record,
     #[error("Error reading database")]
     Database,
+}
+
+#[derive(Clone, Copy)]
+struct Resolver<'a> {
+    resolver: &'a dyn lasso::Resolver,
+    records: &'a RecordSchemas,
+}
+
+impl<'a> From<&'a Resolved> for Resolver<'a> {
+    fn from(resolved: &'a Resolved) -> Self {
+        Resolver {
+            resolver: &resolved.resolver,
+            records: &resolved.records,
+        }
+    }
+}
+
+impl<'a> std::ops::Index<Ident> for Resolver<'a> {
+    type Output = str;
+
+    fn index(&self, index: Ident) -> &Self::Output {
+        &self.resolver.resolve(&index.0)
+    }
+}
+
+impl<'a> std::ops::Index<RecordId> for Resolver<'a> {
+    type Output = RecordSchema;
+
+    fn index(&self, index: RecordId) -> &Self::Output {
+        &self.records[index]
+    }
 }
 
 // Helper types that can be serialized
@@ -51,7 +83,7 @@ impl SerializedValue {
         })
     }
 
-    pub fn from_resolved(v: &Value, resolved: &Resolved) -> Self {
+    pub fn from_resolved(v: &Value, resolved: Resolver) -> Self {
         match v {
             Value::Unit => Self::Unit,
             Value::String(s) => Self::String(s.clone()),
@@ -116,7 +148,7 @@ impl SerializedRecord {
 }
 
 impl SerializedRecord {
-    pub fn from_resolved(r: &Record, resolved: &Resolved) -> Self {
+    pub fn from_resolved(r: &Record, resolved: Resolver) -> Self {
         Self {
             name: resolved[resolved[r.schema].name].to_owned(),
             values: resolved[r.schema]
@@ -168,7 +200,7 @@ impl SerializedDatabaseEntry {
         })
     }
 
-    pub fn from_resolved(dbe: &DatabaseEntry, resolved: &Resolved) -> Self {
+    pub fn from_resolved(dbe: &DatabaseEntry, resolved: Resolver) -> Self {
         SerializedDatabaseEntry {
             target: SerializedRecord::from_resolved(&dbe.target, resolved),
             fast_trace: dbe.fast_trace.clone(),
@@ -212,7 +244,7 @@ impl Database {
         block: bool,
         interner: &mut Rodeo,
         records: &RecordSchemas,
-    ) -> Result<Option<(Self, bool)>, Error> {
+    ) -> Result<Option<Self>, Error> {
         let Some(mut store) = store::Store::open(path, block)? else {
             return Ok(None);
         };
@@ -243,8 +275,15 @@ impl Database {
                 duplicates += 1;
             }
         }
-        let needs_compaction = duplicates * 2 > entries.len();
-        Ok(Some((Database { store, entries }, needs_compaction)))
+        let do_compact = duplicates * 2 > entries.len();
+        let mut database = Database { store, entries };
+        if do_compact {
+            database.compact(Resolver {
+                resolver: &interner,
+                records,
+            })?;
+        }
+        Ok(Some(database))
     }
 
     pub fn add(
@@ -253,7 +292,7 @@ impl Database {
         resolved: &Resolved,
     ) -> Result<(), Error> {
         let serialized = postcard::to_stdvec(
-            &SerializedDatabaseEntry::from_resolved(&entry, resolved),
+            &SerializedDatabaseEntry::from_resolved(&entry, resolved.into()),
         )
         .unwrap();
         self.store.append_record(&serialized)?;
@@ -261,7 +300,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn compact(&mut self, resolved: &Resolved) -> Result<(), Error> {
+    pub fn compact(&mut self, resolved: Resolver) -> Result<(), Error> {
         let mut path = self.store.path.clone();
         path.add_extension("tmp");
         // Create new empty store as temporary file
