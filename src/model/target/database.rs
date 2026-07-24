@@ -300,7 +300,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn compact(&mut self, resolved: Resolver) -> Result<(), Error> {
+    fn compact(&mut self, resolved: Resolver) -> Result<(), Error> {
         let mut path = self.store.path.clone();
         path.add_extension("tmp");
         // Create new empty store as temporary file
@@ -314,8 +314,10 @@ impl Database {
 
             out.append_record(&serialized)?;
         }
+
         // Replace old store with new store
-        std::fs::rename(&path, &self.store.path)?;
+        out.mv(&self.store.path)?;
+
         // Keep working with new store
         self.store = out;
         // TODO: What happens if another process is waiting on the

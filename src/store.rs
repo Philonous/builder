@@ -12,33 +12,40 @@ use std::{
 /// Usage note: This code assumes that the consumer first does a full
 /// read, then starts calling append. append before reads reached the
 /// end will panic, reads after the end has been reached once will always
-/// return None, even if more records have been added.
+/// return None, even if more records have been added in the meantime.
 pub struct Store {
+    // Absolute path
     pub path: PathBuf,
     file: Mutex<File>,
     // Length of file at start (and never updated) so we don't have to
-    // read metadata on every read - concurrent writes are forbidden.
+    // read metadata on every read. Becomes irrelevant once we have
+    // ingested the entire file
     length: u64,
     // Reached end once via read_record, switched to write mode
     reached_end: bool,
 }
 
 impl Store {
-    /// Open database, returning Some(db) on success, None when the
+    /// Open database, returning Some(store) on success, None when the
     /// databse is locked. Blocks until the database is available when
     /// block is true
-    pub fn open(path: impl AsRef<Path>, block: bool) -> Result<Option<Self>, std::io::Error> {
+    pub fn open(
+        path: impl AsRef<Path>,
+        block: bool,
+    ) -> Result<Option<Self>, std::io::Error> {
+        let path: PathBuf = std::path::absolute(path)?;
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
-            .open(path.as_ref())?;
+            .open(&path)?;
+
         match file.try_lock() {
             Ok(_) => {} // File now locked
             Err(TryLockError::WouldBlock) => {
                 tracing::info!(
                     "Store file {:?} locked, waiting for other processes to finish",
-                    path.as_ref()
+                    path
                 );
                 if block {
                     file.lock()?
@@ -49,9 +56,13 @@ impl Store {
             Err(TryLockError::Error(e)) => return Err(e),
         }
 
+        // Sync directory
+        File::open(path.parent().expect("parent directory of absolute path"))?
+            .sync_all()?;
+
         let length = file.metadata()?.len();
         Ok(Some(Store {
-            path: path.as_ref().to_owned(),
+            path,
             file: Mutex::new(file),
             length,
             reached_end: false,
@@ -60,10 +71,11 @@ impl Store {
 
     // Force-create a new database
     pub fn new(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        let path: PathBuf = std::path::absolute(path)?;
         let file = OpenOptions::new()
             .create_new(true)
             .append(true)
-            .open(path.as_ref())?;
+            .open(&path)?;
         match file.try_lock() {
             Ok(_) => {}
             Err(TryLockError::Error(e)) => {
@@ -72,14 +84,17 @@ impl Store {
             Err(TryLockError::WouldBlock) => {
                 tracing::error!(
                     "EWOULDBLOCK while locking newly created file {:?}",
-                    path.as_ref()
+                    &path
                 );
                 return Err(std::io::ErrorKind::WouldBlock.into());
             }
         }
+        // Sync directory after creating file
+        File::open(path.parent().expect("parent directory of absolute path"))?
+            .sync_all()?;
 
         Ok(Store {
-            path: path.as_ref().to_owned(),
+            path,
             file: Mutex::new(file),
             length: 0,
             reached_end: true,
@@ -141,7 +156,10 @@ impl Store {
 
     /// Append a record. This function panics unless the database has
     /// been read to the end (next_record() until None)
-    pub fn append_record(&mut self, record: &[u8]) -> Result<(), std::io::Error> {
+    pub fn append_record(
+        &mut self,
+        record: &[u8],
+    ) -> Result<(), std::io::Error> {
         assert!(
             self.reached_end,
             "Store needs to be at end position before writing"
@@ -151,6 +169,28 @@ impl Store {
         file.write_all(record)?;
         file.flush()?;
         file.sync_all()?;
+        Ok(())
+    }
+
+    pub fn mv(&mut self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        std::fs::rename(&self.path, path.as_ref())?;
+        // Sync target directory
+        File::open(
+            path.as_ref()
+                .parent()
+                .expect("parent directory of absolute path"),
+        )?
+        .sync_all()?;
+
+        // Sync source directory
+        File::open(
+            self.path
+                .parent()
+                .expect("parent directory of absolute path"),
+        )?
+        .sync_all()?;
+
+        self.path = path.as_ref().to_owned();
         Ok(())
     }
 }
