@@ -200,7 +200,7 @@ impl SerializedDatabaseEntry {
         })
     }
 
-    pub fn from_resolved(dbe: &DatabaseEntry, resolved: Resolver) -> Self {
+    fn from_resolved(dbe: &DatabaseEntry, resolved: Resolver) -> Self {
         SerializedDatabaseEntry {
             target: SerializedRecord::from_resolved(&dbe.target, resolved),
             fast_trace: dbe.fast_trace.clone(),
@@ -236,6 +236,7 @@ pub struct DatabaseEntry {
 pub struct Database {
     store: store::Store,
     entries: HashMap<record::Record, DatabaseEntry>,
+    duplicates: usize,
 }
 
 impl Database {
@@ -275,14 +276,13 @@ impl Database {
                 duplicates += 1;
             }
         }
-        let do_compact = duplicates * 2 > entries.len();
-        let mut database = Database { store, entries };
-        if do_compact {
-            database.compact(Resolver {
-                resolver: &interner,
-                records,
-            })?;
-        }
+
+        let database = Database {
+            store,
+            entries,
+            duplicates,
+        };
+
         Ok(Some(database))
     }
 
@@ -296,7 +296,12 @@ impl Database {
         )
         .unwrap();
         self.store.append_record(&serialized)?;
-        self.entries.insert(entry.target.clone(), entry);
+        if let Some(_) = self.entries.insert(entry.target.clone(), entry) {
+            self.duplicates += 1;
+            if self.duplicates > self.entries.len() {
+                self.compact(resolved.into())?
+            }
+        }
         Ok(())
     }
 
@@ -306,20 +311,19 @@ impl Database {
         // Create new empty store as temporary file
         let mut out = store::Store::new(path.clone())?;
         // Copy live entries into new store
-        for item in self.entries.values() {
-            let serialized = postcard::to_stdvec(
-                &SerializedDatabaseEntry::from_resolved(&item, resolved),
-            )
-            .unwrap();
-
-            out.append_record(&serialized)?;
-        }
+        out.append_records(self.entries.values().map(|item| {
+            postcard::to_stdvec(&SerializedDatabaseEntry::from_resolved(
+                &item, resolved,
+            ))
+            .unwrap()
+        }))?;
 
         // Replace old store with new store
         out.mv(&self.store.path)?;
 
         // Keep working with new store
         self.store = out;
+        self.duplicates = 0;
         // TODO: What happens if another process is waiting on the
         // file lock of the overwritten file?
         Ok(())

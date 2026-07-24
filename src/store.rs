@@ -5,6 +5,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+type Result<T> = std::result::Result<T, std::io::Error>;
+
+fn append_record_raw(file: &mut File, record: &[u8]) -> Result<()> {
+    file.write_all(&(record.len() as u32).to_be_bytes())?;
+    file.write_all(record)?;
+    Ok(())
+}
+
 /// Stores records (list of arbitrary slices of u8) in a file - append
 /// only. Recognizes incomplete writes and truncates file on read.
 /// No CRC or similar for now
@@ -29,10 +37,7 @@ impl Store {
     /// Open database, returning Some(store) on success, None when the
     /// databse is locked. Blocks until the database is available when
     /// block is true
-    pub fn open(
-        path: impl AsRef<Path>,
-        block: bool,
-    ) -> Result<Option<Self>, std::io::Error> {
+    pub fn open(path: impl AsRef<Path>, block: bool) -> Result<Option<Self>> {
         let path: PathBuf = std::path::absolute(path)?;
         let file = OpenOptions::new()
             .create(true)
@@ -70,7 +75,7 @@ impl Store {
     }
 
     // Force-create a new database
-    pub fn new(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path: PathBuf = std::path::absolute(path)?;
         let file = OpenOptions::new()
             .create_new(true)
@@ -101,7 +106,7 @@ impl Store {
         })
     }
 
-    pub fn next_record(&mut self) -> Result<Option<Vec<u8>>, std::io::Error> {
+    pub fn next_record(&mut self) -> Result<Option<Vec<u8>>> {
         if self.reached_end {
             return Ok(None);
         }
@@ -156,23 +161,38 @@ impl Store {
 
     /// Append a record. This function panics unless the database has
     /// been read to the end (next_record() until None)
-    pub fn append_record(
-        &mut self,
-        record: &[u8],
-    ) -> Result<(), std::io::Error> {
+    pub fn append_record(&mut self, record: &[u8]) -> Result<()> {
         assert!(
             self.reached_end,
             "Store needs to be at end position before writing"
         );
         let mut file = self.file.lock();
-        file.write_all(&(record.len() as u32).to_be_bytes())?;
-        file.write_all(record)?;
+        append_record_raw(&mut *file, record)?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
+    }
+    /// Append multiple record. This function panics unless the database has
+    /// been read to the end (next_record() until None)
+    pub fn append_records<I>(&mut self, records: I) -> Result<()>
+    where
+        I: IntoIterator,
+        I::Item: AsRef<[u8]>,
+    {
+        assert!(
+            self.reached_end,
+            "Store needs to be at end position before writing"
+        );
+        let mut file = self.file.lock();
+        for record in records {
+            append_record_raw(&mut *file, record.as_ref())?;
+        }
         file.flush()?;
         file.sync_all()?;
         Ok(())
     }
 
-    pub fn mv(&mut self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+    pub fn mv(&mut self, path: impl AsRef<Path>) -> Result<()> {
         std::fs::rename(&self.path, path.as_ref())?;
         // Sync target directory
         File::open(
@@ -196,7 +216,7 @@ impl Store {
 }
 
 impl Iterator for Store {
-    type Item = Result<Vec<u8>, std::io::Error>;
+    type Item = Result<Vec<u8>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next_record().transpose()
@@ -222,7 +242,7 @@ mod test {
         drop(db);
 
         let db = Store::open(tmp.join("db"), true).unwrap().unwrap();
-        let res = db.collect::<Result<Vec<_>, _>>().unwrap();
+        let res = db.collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(res, EXAMPLE);
     }
 
@@ -238,7 +258,7 @@ mod test {
         drop(db);
 
         let db = Store::open(tmp.join("db"), true).unwrap().unwrap();
-        let res = db.collect::<Result<Vec<_>, _>>().unwrap();
+        let res = db.collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(res, EXAMPLE);
     }
 
