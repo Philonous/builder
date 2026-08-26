@@ -83,7 +83,7 @@ impl SerializedValue {
         })
     }
 
-    pub fn from_resolved(v: &Value, resolved: Resolver) -> Self {
+    fn from_resolved(v: &Value, resolved: Resolver) -> Self {
         match v {
             Value::Unit => Self::Unit,
             Value::String(s) => Self::String(s.clone()),
@@ -148,7 +148,7 @@ impl SerializedRecord {
 }
 
 impl SerializedRecord {
-    pub fn from_resolved(r: &Record, resolved: Resolver) -> Self {
+    fn from_resolved(r: &Record, resolved: Resolver) -> Self {
         Self {
             name: resolved[resolved[r.schema].name].to_owned(),
             values: resolved[r.schema]

@@ -2,13 +2,14 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU32;
 
 use super::eval;
 use super::parameters::{Parameter, Parameters};
 use super::value::record;
 use super::value::Ident;
 use super::value::{RecordPattern, RecordSchemas, Value};
-use crate::error::{self, AddErrors, Spanned, WithSpan};
+use crate::error::{self, Spanned, WithSpan};
 use crate::log::blog;
 use crate::model::eval::RecordId;
 use crate::model::value::{DisplayWith, WithDisplayCtxExt};
@@ -158,6 +159,10 @@ pub struct TargetType {
 pub struct TargetResult {
     pub value: Value,
     pub clean: bool,
+    // True if the target ran, false if it was skipped because its
+    // dependencies were clean
+    // TODO
+    pub ran: bool,
 }
 
 impl TargetType {
@@ -488,7 +493,7 @@ impl Target {
     ) -> Result<TargetResult, error::Spanned<eval::Error>> {
         let target_type = &resolved[self.kind];
         let tgt = Request_ {
-            request,
+            request: request.clone(),
             target_type: self.kind,
         }
         .with_ctx(resolved)
@@ -524,6 +529,7 @@ impl Target {
                     return Ok(TargetResult {
                         value: c.result,
                         clean: true,
+                        ran: false,
                     });
                 };
             }
@@ -600,7 +606,11 @@ impl Target {
             _ => false,
         };
 
-        Ok(TargetResult { value, clean })
+        Ok(TargetResult {
+            value,
+            clean,
+            ran: true,
+        })
     }
 }
 
@@ -689,6 +699,13 @@ enum TargetState {
     Error(Spanned<eval::Error>),
 }
 
+#[derive(Debug)]
+struct RequestedTarget {
+    kind: TargetTypeId,
+    state: TargetState,
+    seq: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Request {
     pub target: TargetId,
@@ -708,12 +725,12 @@ impl DisplayWith for Request {
 }
 
 // /For displaying targets
-pub struct Request_<'a> {
+pub struct Request_ {
     pub target_type: TargetTypeId,
-    pub request: &'a record::Record,
+    pub request: record::Record,
 }
 
-impl<'a> DisplayWith for Request_<'a> {
+impl<'a> DisplayWith for Request_ {
     fn fmt(
         &self,
         f: &mut std::fmt::Formatter<'_>,
@@ -733,16 +750,22 @@ pub struct Dependency {
 
 // single-threaded scheduler
 pub struct Scheduler {
-    requested: HashMap<record::Record, TargetState>,
+    next: AtomicU32,
+    requested: HashMap<record::Record, RequestedTarget>,
     database: Database,
 }
 
 impl Scheduler {
     pub fn new(database: Database) -> Self {
         Self {
+            next: AtomicU32::new(0),
             requested: Default::default(),
             database,
         }
+    }
+
+    fn next_seq(&self) -> u32 {
+        self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn add(
@@ -763,40 +786,48 @@ impl Scheduler {
         match old {
             None => {
                 tracing::trace!("New target {:?} requested", request);
-                self.requested
-                    .insert(request.clone(), TargetState::Requested);
+                self.requested.insert(
+                    request.clone(),
+                    RequestedTarget {
+                        kind: resolved[target].kind,
+                        seq: self.next_seq(),
+                        state: TargetState::Requested,
+                    },
+                );
                 Ok(())
             }
             // Target was already built
-            Some(TargetState::Done(_)) => {
-                tracing::trace!("Target {:?} was already done", request);
-                Ok(())
-            }
-            Some(TargetState::Running) => {
-                tracing::error!("Target request {:?} is circular", request);
-                Err(eval::Error::CircularDependency(
-                    request.with_ctx(resolved).to_string(),
-                ))
-                .without_span()
-            }
-            Some(TargetState::Error(_)) => {
-                tracing::trace!(
-                    "Target {:?} had already finished with an error",
-                    request
-                );
-                Err(eval::Error::DependencyError(
-                    request.with_ctx(resolved).to_string(),
-                ))
-                .without_span()
-            }
-            // Multiple need() on the same target - that's OK
-            Some(TargetState::Requested) => {
-                tracing::trace!(
+            Some(s) => match s.state {
+                TargetState::Done(_) => {
+                    tracing::trace!("Target {:?} was already done", request);
+                    Ok(())
+                }
+                TargetState::Running => {
+                    tracing::error!("Target request {:?} is circular", request);
+                    Err(eval::Error::CircularDependency(
+                        request.with_ctx(resolved).to_string(),
+                    ))
+                    .without_span()
+                }
+                TargetState::Error(_) => {
+                    tracing::trace!(
+                        "Target {:?} had already finished with an error",
+                        request
+                    );
+                    Err(eval::Error::DependencyError(
+                        request.with_ctx(resolved).to_string(),
+                    ))
+                    .without_span()
+                }
+                // Multiple need() on the same target - that's OK
+                TargetState::Requested => {
+                    tracing::trace!(
                     "Target {:?} had already been requested but was not yet finished",
                     request
                 );
-                Ok(())
-            }
+                    Ok(())
+                }
+            },
         }?;
         Ok(target)
     }
@@ -806,10 +837,11 @@ impl Scheduler {
         resolved: &eval::Resolved,
         request: &record::Record,
     ) -> Result<Option<TargetResult>, eval::Error> {
-        match self
+        match &self
             .requested
             .get(request)
-            .expect("find_result on resource that has not be scheduled")
+            .expect("find_result on resource that has not been scheduled")
+            .state
         {
             TargetState::Done(v) => Ok(Some(v.clone())),
             TargetState::Error(_) => Err(eval::Error::DependencyError(
@@ -824,23 +856,27 @@ impl Scheduler {
         resolved: &eval::Resolved,
         request: Request,
     ) -> Result<TargetResult, eval::Error> {
+        (*self.requested.get_mut(&request.request).expect("run_one")).state =
+            TargetState::Running;
         match resolved[request.target].run(resolved, self, &request.request) {
             Ok(res) => {
-                *self
+                (*self
                     .requested
                     .get_mut(&request.request)
                     // add() has added the item to requested as well
-                    .expect("flush") = TargetState::Done(res.clone());
+                    .expect("run_one"))
+                .state = TargetState::Done(res.clone());
                 Ok(res)
             }
             Err(e) => {
                 let tgt = request.with_ctx(resolved).to_string();
                 blog!(error, target = tgt, "Target failed with: {e}");
-                *self
+                (*self
                     .requested
                     .get_mut(&request.request)
                     // Entry must exist by construction
-                    .expect("flush") = TargetState::Error(e);
+                    .expect("flush"))
+                .state = TargetState::Error(e);
                 Err(eval::Error::DependencyError(tgt))
             }
         }
@@ -862,23 +898,26 @@ impl Scheduler {
         }
     }
 
+    fn take(&mut self) -> HashMap<record::Record, RequestedTarget> {
+        self.next.store(0, std::sync::atomic::Ordering::Relaxed);
+        std::mem::take(&mut self.requested)
+    }
+
     // Entrypoint for main
+    // Errors when the targets could not be added
     pub fn demand_all(
         &mut self,
         resolved: &eval::Resolved,
         recs: &[record::Record],
-    ) -> Result<Vec<Value>, error::Errors<eval::Error>> {
-        let mut errors: error::Errors<eval::Error> = error::Errors::empty();
+    ) -> Result<Vec<TargetReport>, Spanned<eval::Error>> {
         let mut requests = Vec::with_capacity(recs.len());
         for r in recs.iter() {
-            self.add(resolved, r).add_errors(&mut errors).map(|target| {
-                requests.push(Request {
-                    target,
-                    request: r.clone(),
-                })
+            let target = self.add(resolved, r)?;
+            requests.push(Request {
+                target,
+                request: r.clone(),
             });
         }
-        errors.ok(())?;
 
         let mut res = Vec::with_capacity(requests.len());
         for r in requests.into_iter() {
@@ -888,22 +927,59 @@ impl Scheduler {
                 .map(|v| res.push(v.value));
         }
 
-        // Collect all errors from all targets including dependencies
-        let errors = error::Errors(
-            std::mem::take(&mut self.requested)
-                .into_values()
-                .filter_map(|st| match st {
-                    TargetState::Error(e) => Some(e),
-                    TargetState::Requested => unreachable!(
-                        "target in requested state after demand_all"
-                    ),
-                    TargetState::Running => {
-                        unreachable!("target in running state after demand_all")
+        let mut report: Vec<TargetReport> = self
+            .take()
+            .into_iter()
+            .map(|(request, st)| TargetReport {
+                seq: st.seq,
+                request: Request_ {
+                    request: request.clone(),
+                    target_type: st.kind,
+                },
+                result: match st.state {
+                    TargetState::Error(error) => ReportResult::Error { error },
+
+                    // TODO: Check that this state can be reached and corresponds to a cancelled dependency
+                    TargetState::Requested => ReportResult::Cancelled,
+                    TargetState::Running => ReportResult::Cancelled,
+                    TargetState::Done(res) if res.ran => {
+                        ReportResult::Success {
+                            clean: res.clean,
+                            value: res.value,
+                        }
                     }
-                    TargetState::Done(_) => None,
-                })
-                .collect(),
-        );
-        errors.ok(res)
+                    TargetState::Done(_res) => ReportResult::Skipped,
+                },
+            })
+            .collect();
+        report.sort_unstable_by_key(|r| r.seq);
+        Ok(report)
     }
+}
+
+// Reporting
+////////////
+
+pub enum ReportResult {
+    /// Target ran successfully
+    Success {
+        clean: bool,
+        value: eval::Value,
+    },
+    /// Scheduler decided target did not need to be run (e.g. cache
+    /// hit, dependencies clean)
+    Skipped,
+    /// Scheduled to run but not finished, e.g. build failed
+    /// before target was handled
+    Cancelled,
+    Error {
+        error: Spanned<eval::Error>,
+    },
+}
+
+pub struct TargetReport {
+    /// Rendered name
+    pub seq: u32,
+    pub request: Request_,
+    pub result: ReportResult,
 }

@@ -1,4 +1,3 @@
-use super::string::QuoteError;
 use chumsky::input::Stream;
 use chumsky::{input::ValueInput, prelude::*};
 

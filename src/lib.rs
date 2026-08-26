@@ -25,7 +25,10 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     error::Errors,
-    model::eval::{self, Resolved},
+    model::{
+        eval::{self, Resolved},
+        value::WithDisplayCtxExt,
+    },
 };
 use log::blog;
 
@@ -173,6 +176,7 @@ pub fn main() {
         }
         Command::Run { request } => {
             let src = Arc::new(read_file(file));
+            let source = Source::from(src.as_ref());
             let cwd = match cli.working_dir {
                 None => std::env::current_dir(),
                 Some(working_dir) => std::path::absolute(working_dir),
@@ -212,18 +216,36 @@ pub fn main() {
             let mut scheduler = model::target::Scheduler::new(database);
 
             match scheduler.demand_all(&resolved, &vec![request]) {
-                Err(e) => {
-                    let source = Source::from(src.as_ref());
+                Err(err) => {
                     blog!(error, "Build failed");
-                    for err in e.iter() {
-                        error::report(err)
-                            .print(&source)
-                            .expect("ariadne: print error");
-                    }
+                    error::report(&err)
+                        .print(&source)
+                        .expect("ariadne: print error");
                     std::process::exit(1)
                 }
-                Ok(_res) => {
+                Ok(res) => {
                     blog!(info, "Build finished");
+                    for report in res {
+                        eprint!("{}: ", report.request.with_ctx(&resolved));
+                        match report.result {
+                            model::target::ReportResult::Success {
+                                clean,
+                                value,
+                            } => eprintln!("completed successfully"),
+                            model::target::ReportResult::Skipped => {
+                                eprintln!("did not need to be run")
+                            }
+                            model::target::ReportResult::Cancelled => {
+                                eprintln!("was cancelled")
+                            }
+                            model::target::ReportResult::Error { error } => {
+                                eprintln!("");
+                                error::report(&error)
+                                    .print(&source)
+                                    .expect("ariadne: print error");
+                            }
+                        }
+                    }
                 }
             };
         }
