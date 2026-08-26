@@ -731,7 +731,7 @@ impl<'a> parser::Ast<'a> {
     pub fn resolve(
         self,
         workdir: &'a Path,
-    ) -> Result<eval::Resolved<Rodeo>, Errors<Error>> {
+    ) -> Result<eval::Resolved<Rodeo, ()>, Errors<Error>> {
         let mut errors = Errors::empty();
 
         let mut interner = Rodeo::new();
@@ -774,6 +774,7 @@ impl<'a> parser::Ast<'a> {
             records,
             target_types,
             targets,
+            sources: (),
         })
     }
 }

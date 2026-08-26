@@ -107,7 +107,7 @@ fn resolve<'a>(
     src: &'a str,
     ast: parser::parser::Ast<'a>,
     workdir: &Path,
-) -> Resolved<lasso::Rodeo> {
+) -> Resolved<lasso::Rodeo, ()> {
     match ast.resolve(workdir) {
         Ok(decls) => decls,
         Err(error::Errors(errs)) => {
@@ -175,8 +175,8 @@ pub fn main() {
             println!("Source file {:?} checked without errors", &file);
         }
         Command::Run { request } => {
-            let src = Arc::new(read_file(file));
-            let source = Source::from(src.as_ref());
+            let src = Arc::from(read_file(file).as_str());
+            let source = Source::from(Arc::clone(&src));
             let cwd = match cli.working_dir {
                 None => std::env::current_dir(),
                 Some(working_dir) => std::path::absolute(working_dir),
@@ -199,6 +199,7 @@ pub fn main() {
                 records: resolved.records,
                 target_types: resolved.target_types,
                 targets: resolved.targets,
+                sources: source.clone(),
             };
 
             let target = match resolved.targets.find_by_string(&request) {
@@ -225,26 +226,9 @@ pub fn main() {
                 }
                 Ok(res) => {
                     blog!(info, "Build finished");
+                    eprintln!("\nTarget report (in starting order):");
                     for report in res {
-                        eprint!("{}: ", report.request.with_ctx(&resolved));
-                        match report.result {
-                            model::target::ReportResult::Success {
-                                clean,
-                                value,
-                            } => eprintln!("completed successfully"),
-                            model::target::ReportResult::Skipped => {
-                                eprintln!("did not need to be run")
-                            }
-                            model::target::ReportResult::Cancelled => {
-                                eprintln!("was cancelled")
-                            }
-                            model::target::ReportResult::Error { error } => {
-                                eprintln!("");
-                                error::report(&error)
-                                    .print(&source)
-                                    .expect("ariadne: print error");
-                            }
-                        }
+                        report.pprint(&resolved);
                     }
                 }
             };

@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU32;
+use yansi::Paint as _;
 
 use super::eval;
 use super::parameters::{Parameter, Parameters};
@@ -982,4 +983,41 @@ pub struct TargetReport {
     pub seq: u32,
     pub request: Request_,
     pub result: ReportResult,
+}
+
+impl TargetReport {
+    pub fn pprint(&self, resolved: &eval::Resolved) {
+        // Status colour
+        let (glyph, color) = match &self.result {
+            ReportResult::Success { .. } => ("+", yansi::Color::Green),
+            ReportResult::Skipped => ("-", yansi::Color::White),
+            ReportResult::Cancelled => ("X", yansi::Color::Yellow),
+            ReportResult::Error { .. } => ("X", yansi::Color::Red),
+        };
+        eprint!(
+            "[{}] ",
+            self.request
+                .with_ctx(resolved)
+                .paint(yansi::Color::BrightBlue)
+        );
+        match &self.result {
+            ReportResult::Success { clean, value } => {
+                eprint!("{}", "completed".paint(color));
+                if *clean {
+                    eprint!(" (no changes)")
+                }
+            }
+            ReportResult::Skipped => {
+                eprint!("{}", "skipped".paint(color))
+            }
+            ReportResult::Cancelled => {
+                eprint!("{}", "cancelled".paint(color))
+            }
+            ReportResult::Error { error } => {
+                eprint!("{}\n", "error: ".paint(color),);
+                error::report(error).print(&resolved.sources).unwrap()
+            }
+        }
+        eprintln!("")
+    }
 }
