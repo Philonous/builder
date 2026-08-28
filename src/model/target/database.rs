@@ -65,6 +65,7 @@ pub enum SerializedValue {
     String(String),
     Record(SerializedRecord),
     Int(i64),
+    Bool(bool),
 }
 
 impl SerializedValue {
@@ -80,6 +81,7 @@ impl SerializedValue {
                 Value::Record(record.resolve(interner, records)?)
             }
             SerializedValue::Int(i) => Value::Int(i),
+            SerializedValue::Bool(b) => Value::Bool(b),
         })
     }
 
@@ -91,6 +93,7 @@ impl SerializedValue {
                 Self::Record(SerializedRecord::from_resolved(record, resolved))
             }
             Value::Int(i) => Self::Int(*i),
+            Value::Bool(b) => Self::Bool(*b),
         }
     }
 }

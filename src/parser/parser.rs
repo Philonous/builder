@@ -25,12 +25,14 @@ impl<'a> Default for Ident<'a> {
 #[derive(Clone, PartialEq, Debug)]
 pub enum Lit<'a> {
     String(Quoted<'a>),
+    Bool(bool),
 }
 
 impl<'a> std::fmt::Display for Lit<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::String(str) => write!(f, "{}", str),
+            Self::Bool(b) => write!(f, "{}", if *b { "true" } else { "false" }),
         }
     }
 }
@@ -293,6 +295,7 @@ impl<'tok> Lit<'tok> {
                 string!(LitPart(s)) => Lit::String(s),
         }
         .delimited_by(just(normal!(StringStart)), just(string!(StringEnd)))
+        .or(select! { normal!(Bool(b)) => Lit::Bool(b) })
     }
 }
 

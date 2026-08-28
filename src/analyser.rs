@@ -149,6 +149,7 @@ impl<'a> parser::Lit<'a> {
     pub fn resolve<'b>(self) -> Result<eval::Value, Error> {
         Ok(match self {
             parser::Lit::String(s) => eval::Value::String(s.unquote()?),
+            parser::Lit::Bool(b) => eval::Value::Bool(b),
         })
     }
 }
@@ -731,7 +732,7 @@ impl<'a> parser::Ast<'a> {
     pub fn resolve(
         self,
         workdir: &'a Path,
-    ) -> Result<eval::Resolved<Rodeo, ()>, Errors<Error>> {
+    ) -> Result<eval::Resolved<Rodeo>, Errors<Error>> {
         let mut errors = Errors::empty();
 
         let mut interner = Rodeo::new();
@@ -774,7 +775,6 @@ impl<'a> parser::Ast<'a> {
             records,
             target_types,
             targets,
-            sources: (),
         })
     }
 }

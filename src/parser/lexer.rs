@@ -44,6 +44,10 @@ pub enum NormalToken<'a> {
     #[regex(r#"""#)]
     StringStart,
 
+    #[token("true", |_| true)]
+    #[token("false", |_| false)]
+    Bool(bool),
+
     // Keywords
     #[token("let")]
     Let,
@@ -74,6 +78,7 @@ impl fmt::Display for NormalToken<'_> {
             Self::Equals => write!(f, "equals"),
             Self::Underscore => write!(f, "underscore"),
             Self::StringStart => write!(f, "quotation mark"),
+            Self::Bool(b) => write!(f, "{}", if *b { "true" } else { "false" }),
             Self::CommandStart => write!(f, "backtick"),
             Self::Let => write!(f, "let"),
             Self::Need => write!(f, "need"),

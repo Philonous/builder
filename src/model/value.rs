@@ -30,6 +30,7 @@ pub enum Type {
     String,
     Record,
     Int,
+    Bool,
 }
 
 impl std::fmt::Display for Type {
@@ -39,6 +40,7 @@ impl std::fmt::Display for Type {
             Type::String => write!(f, "string"),
             Type::Record => write!(f, "record"),
             Type::Int => write!(f, "int"),
+            Type::Bool => write!(f, "bool"),
         }
     }
 }
@@ -50,6 +52,7 @@ pub enum Value {
     String(String),
     Record(Record),
     Int(i64),
+    Bool(bool),
 }
 
 impl Value {
@@ -59,6 +62,7 @@ impl Value {
             Self::String(_) => Type::String,
             Self::Record(_record) => Type::Record,
             Self::Int(_) => Type::Int,
+            Self::Bool(_) => Type::Bool,
         }
     }
 
@@ -98,6 +102,9 @@ impl DisplayWith for Value {
             Value::String(s) => write!(f, "{}", s),
             Value::Record(record) => write!(f, "{}", record.with_ctx(ctx)),
             Value::Int(i) => write!(f, "{}", i),
+            Value::Bool(b) => {
+                write!(f, "{}", if *b { "true" } else { "false" })
+            }
         }
     }
 }
