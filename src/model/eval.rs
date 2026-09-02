@@ -410,13 +410,12 @@ impl<'a> Into<DisplayCtx<'a>> for &'a EvalContext<'a> {
 }
 
 #[derive(Debug)]
-pub struct Resolved<R = RodeoResolver, C = ariadne::Source<Arc<str>>> {
+pub struct Resolved<R = RodeoResolver> {
     pub functions: Functions,
     pub resolver: R,
     pub records: RecordSchemas,
     pub target_types: TargetTypes,
     pub targets: Targets,
-    pub sources: C,
 }
 
 impl<'a> Into<DisplayCtx<'a>> for &'a Resolved {
@@ -450,7 +449,7 @@ impl<'a> EvalContext<'a> {
     }
 }
 
-impl<'a, T, C> std::ops::Index<FunId> for Resolved<T, C> {
+impl<'a, T> std::ops::Index<FunId> for Resolved<T> {
     type Output = Fun;
 
     fn index(&self, index: FunId) -> &Self::Output {
@@ -458,7 +457,7 @@ impl<'a, T, C> std::ops::Index<FunId> for Resolved<T, C> {
     }
 }
 
-impl<'a, T, C> std::ops::Index<RecordId> for Resolved<T, C> {
+impl<'a, T> std::ops::Index<RecordId> for Resolved<T> {
     type Output = RecordSchema;
 
     fn index(&self, index: RecordId) -> &Self::Output {
@@ -466,7 +465,7 @@ impl<'a, T, C> std::ops::Index<RecordId> for Resolved<T, C> {
     }
 }
 
-impl<'a, T, C> std::ops::Index<TargetTypeId> for Resolved<T, C> {
+impl<'a, T> std::ops::Index<TargetTypeId> for Resolved<T> {
     type Output = TargetType;
 
     fn index(&self, index: TargetTypeId) -> &Self::Output {
@@ -474,7 +473,7 @@ impl<'a, T, C> std::ops::Index<TargetTypeId> for Resolved<T, C> {
     }
 }
 
-impl<'a, T, C> std::ops::Index<TargetId> for Resolved<T, C> {
+impl<'a, T> std::ops::Index<TargetId> for Resolved<T> {
     type Output = Target;
 
     fn index(&self, index: TargetId) -> &Self::Output {
@@ -482,7 +481,7 @@ impl<'a, T, C> std::ops::Index<TargetId> for Resolved<T, C> {
     }
 }
 
-impl<'a, T: Resolver, C> std::ops::Index<Ident> for Resolved<T, C> {
+impl<'a, T: Resolver> std::ops::Index<Ident> for Resolved<T> {
     type Output = str;
 
     fn index(&self, index: Ident) -> &Self::Output {

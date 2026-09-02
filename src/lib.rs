@@ -107,7 +107,7 @@ fn resolve<'a>(
     src: &'a str,
     ast: parser::parser::Ast<'a>,
     workdir: &Path,
-) -> Resolved<lasso::Rodeo, ()> {
+) -> Resolved<lasso::Rodeo> {
     match ast.resolve(workdir) {
         Ok(decls) => decls,
         Err(error::Errors(errs)) => {
@@ -199,7 +199,6 @@ pub fn main() {
                 records: resolved.records,
                 target_types: resolved.target_types,
                 targets: resolved.targets,
-                sources: source.clone(),
             };
 
             let target = match resolved.targets.find_by_string(&request) {
@@ -228,7 +227,7 @@ pub fn main() {
                     blog!(info, "Build finished");
                     eprintln!("\nTarget report (in starting order):");
                     for report in res {
-                        report.pprint(&resolved);
+                        report.pprint(&source);
                     }
                 }
             };

@@ -725,7 +725,9 @@ impl DisplayWith for Request {
     }
 }
 
-// /For displaying targets
+// For displaying targets
+// It shows them in their punned form (e.g. ./filename instead of
+// file(path="filename"))
 pub struct Request_ {
     pub target_type: TargetTypeId,
     pub request: record::Record,
@@ -934,9 +936,11 @@ impl Scheduler {
             .map(|(request, st)| TargetReport {
                 seq: st.seq,
                 request: Request_ {
-                    request: request.clone(),
+                    request,
                     target_type: st.kind,
-                },
+                }
+                .with_ctx(resolved)
+                .to_string(),
                 result: match st.state {
                     TargetState::Error(error) => ReportResult::Error { error },
 
@@ -961,6 +965,7 @@ impl Scheduler {
 // Reporting
 ////////////
 
+#[derive(Debug)]
 pub enum ReportResult {
     /// Target ran successfully
     Success {
@@ -981,25 +986,20 @@ pub enum ReportResult {
 pub struct TargetReport {
     /// Rendered name
     pub seq: u32,
-    pub request: Request_,
+    pub request: String,
     pub result: ReportResult,
 }
 
 impl TargetReport {
-    pub fn pprint(&self, resolved: &eval::Resolved) {
+    pub fn pprint(&self, sources: impl ariadne::Cache<()>) {
         // Status colour
-        let (glyph, color) = match &self.result {
-            ReportResult::Success { .. } => ("+", yansi::Color::Green),
-            ReportResult::Skipped => ("-", yansi::Color::White),
-            ReportResult::Cancelled => ("X", yansi::Color::Yellow),
-            ReportResult::Error { .. } => ("X", yansi::Color::Red),
+        let (color) = match &self.result {
+            ReportResult::Success { .. } => (yansi::Color::Green),
+            ReportResult::Skipped => (yansi::Color::White),
+            ReportResult::Cancelled => (yansi::Color::Yellow),
+            ReportResult::Error { .. } => (yansi::Color::Red),
         };
-        eprint!(
-            "[{}] ",
-            self.request
-                .with_ctx(resolved)
-                .paint(yansi::Color::BrightBlue)
-        );
+        eprint!("[{}] ", self.request.paint(yansi::Color::BrightBlue));
         match &self.result {
             ReportResult::Success { clean, value } => {
                 eprint!("{}", "completed".paint(color));
@@ -1015,7 +1015,7 @@ impl TargetReport {
             }
             ReportResult::Error { error } => {
                 eprint!("{}\n", "error: ".paint(color),);
-                error::report(error).print(&resolved.sources).unwrap()
+                error::report(error).print(sources).unwrap()
             }
         }
         eprintln!("")
