@@ -8,14 +8,14 @@ use std::{
 use ariadne::Source;
 
 // mod error;
-mod analyser;
-mod common;
-mod error;
-mod log;
-mod model;
-mod parser;
-mod process;
-mod store;
+pub mod analyser;
+pub mod common;
+pub mod error;
+pub mod log;
+pub mod model;
+pub mod parser;
+pub mod process;
+pub mod store;
 
 use clap::{Parser, Subcommand};
 use model::target::database::Database;
@@ -141,6 +141,47 @@ fn read_file(path: &Path) -> String {
     }
 }
 
+pub fn run(
+    cwd: &Path,
+    src: &str,
+    request: impl AsRef<str>,
+) -> Result<Vec<model::target::TargetReport>, error::Spanned<eval::Error>> {
+    let request = request.as_ref();
+    let ast = parse(&src);
+    let mut resolved = resolve(&src, ast, &cwd);
+    let database = Database::load(
+        cwd.join("build.db"),
+        true,
+        &mut resolved.resolver,
+        &resolved.records,
+    )
+    .unwrap()
+    .unwrap();
+    let resolved = Resolved {
+        resolver: resolved.resolver.into_resolver(),
+        functions: resolved.functions,
+        records: resolved.records,
+        target_types: resolved.target_types,
+        targets: resolved.targets,
+    };
+
+    let target = match resolved.targets.find_by_string(&request) {
+        Ok(t) => t,
+        Err(e) => {
+            blog!(error, "{}", e);
+            std::process::exit(1)
+        }
+    };
+    let target_type = &resolved[target.kind];
+    let request = target_type
+        .request_from_name(&resolved, &request)
+        .expect("construct request from name");
+
+    let mut scheduler = model::target::Scheduler::new(database);
+
+    scheduler.demand_all(&resolved, &vec![request])
+}
+
 pub fn main() {
     if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
     {
@@ -174,47 +215,15 @@ pub fn main() {
             println!("Source file {:?} checked without errors", &file);
         }
         Command::Run { request } => {
-            let src = Arc::from(read_file(file).as_str());
-            let source = Source::from(Arc::clone(&src));
             let cwd = match cli.working_dir {
                 None => std::env::current_dir(),
                 Some(working_dir) => std::path::absolute(working_dir),
             }
             .expect("cwd");
+            let src = Arc::from(read_file(file).as_str());
+            let source = Source::from(Arc::clone(&src));
 
-            let ast = parse(&src);
-            let mut resolved = resolve(&src, ast, &cwd);
-            let database = Database::load(
-                cwd.join("build.db"),
-                true,
-                &mut resolved.resolver,
-                &resolved.records,
-            )
-            .unwrap()
-            .unwrap();
-            let resolved = Resolved {
-                resolver: resolved.resolver.into_resolver(),
-                functions: resolved.functions,
-                records: resolved.records,
-                target_types: resolved.target_types,
-                targets: resolved.targets,
-            };
-
-            let target = match resolved.targets.find_by_string(&request) {
-                Ok(t) => t,
-                Err(e) => {
-                    blog!(error, "{}", e);
-                    std::process::exit(1)
-                }
-            };
-            let target_type = &resolved[target.kind];
-            let request = target_type
-                .request_from_name(&resolved, &request)
-                .expect("construct request from name");
-
-            let mut scheduler = model::target::Scheduler::new(database);
-
-            match scheduler.demand_all(&resolved, &vec![request]) {
+            match run(&cwd, &src, &request) {
                 Err(err) => {
                     blog!(error, "Build failed");
                     error::report(&err)
