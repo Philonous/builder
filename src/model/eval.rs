@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -675,6 +676,7 @@ pub fn builtin_fun_write_file(interner: &mut Rodeo) -> Fun {
     let write_file = interner.get_or_intern("write_file");
     let path = interner.get_or_intern("path");
     let val = interner.get_or_intern("val");
+    let append = interner.get_or_intern("append");
     Fun {
         name: Ident(write_file),
         parameters: parameters::Parameters(vec![
@@ -692,25 +694,42 @@ pub fn builtin_fun_write_file(interner: &mut Rodeo) -> Fun {
                     span: None,
                 },
             ),
+            (
+                Ident(append),
+                parameters::Parameter {
+                    default: Some(Value::Bool(false)),
+                    span: None,
+                },
+            ),
         ]),
 
         barrier: true,
         body: FunBody::Builtin(|ctx, args| match args {
-            [path, val] => {
+            [path, val, append] => {
                 let path = path.force(ctx)?;
                 let path = path.expect_string(ctx.resolved)?;
                 let real_path = ctx.cwd.join(path);
                 let val = val.force(ctx)?;
-                std::fs::write(
-                    real_path,
-                    val.with_ctx(ctx.resolved).to_string(),
-                )?;
+                let append = append.force(ctx)?.expect_bool(ctx.resolved)?;
+
+                let mut opts = std::fs::OpenOptions::new();
+                opts.create(true).write(true);
+                if append {
+                    opts.append(true);
+                } else {
+                    opts.truncate(true);
+                }
+                let mut file = opts.open(real_path)?;
+
+                write!(file, "{}", &val.with_ctx(ctx.resolved))?;
 
                 Ok(Value::Unit)
             }
             // Analyser has checked that number of arguments is correct,
             // so this is unreachable
-            _ => unreachable!("builtin print: invalid number of arguments"),
+            _ => unreachable!(
+                "builtin fun_write_file: invalid number of arguments"
+            ),
         }),
     }
 }

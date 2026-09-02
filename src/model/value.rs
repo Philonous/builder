@@ -80,6 +80,20 @@ impl Value {
         }
     }
 
+    pub fn expect_bool(
+        &self,
+        resolved: &Resolved,
+    ) -> Result<bool, eval::Error> {
+        match self {
+            Self::Bool(s) => Ok(*s),
+            _ => Err(eval::Error::TypeError {
+                expected: Type::Bool,
+                found: self.type_of(),
+                display_value: self.with_ctx(resolved).to_string(),
+            }),
+        }
+    }
+
     pub fn expect_record(
         &self,
         resolved: &Resolved,
