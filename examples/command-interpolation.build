@@ -1,0 +1,5 @@
+target task("1") {
+
+  let bla = "-a";
+  `ls {bla} l`;
+}

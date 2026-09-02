@@ -1,6 +1,7 @@
 target file(path) {
+  `bash -c "echo hello > hello"`;
   print("Path: {path}");
-  "hello";
+  "hello"
 }
 
 target task("1") {
@@ -8,7 +9,7 @@ target task("1") {
   let bla = need(file(path="bla"));
   # Check that the value is deferred
   print_debug(hello);
-  print("{hello} world");
+  assert_equal(hello, "hello");
   # Now hello should be forced and bla still be deferred
   print_debug(hello);
   print_debug(bla)
