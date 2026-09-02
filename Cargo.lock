@@ -148,6 +148,7 @@ dependencies = [
  "rapidhash",
  "regex",
  "serde",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

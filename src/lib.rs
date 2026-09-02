@@ -16,7 +16,6 @@ mod model;
 mod parser;
 mod process;
 mod store;
-mod test;
 
 use clap::{Parser, Subcommand};
 use model::target::database::Database;

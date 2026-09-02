@@ -226,13 +226,14 @@ impl Iterator for Store {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test::TempDir;
+    use tempfile::TempDir;
 
     static EXAMPLE: &[&[u8]] = &[&[1, 2, 3], &[], &[99]];
 
     #[test]
     fn simple_roundtrip() {
-        let tmp = TempDir::create("test-simple-roundrip");
+        let td = TempDir::new().unwrap();
+        let tmp = td.as_ref();
         let mut db = Store::open(tmp.join("db"), true).unwrap().unwrap();
         // We have to read to the end first
         assert_eq!(db.next_record().unwrap(), None);
@@ -248,7 +249,9 @@ mod test {
 
     #[test]
     fn iterate_then_append() {
-        let tmp = TempDir::create("iterate-then-append");
+        let td = TempDir::new().unwrap();
+        let tmp = td.as_ref();
+
         let mut db = Store::open(tmp.join("db"), true).unwrap().unwrap();
         // We have to read to the end first
         for _ in &mut db {}
@@ -264,7 +267,9 @@ mod test {
 
     #[test]
     fn ragged_record() {
-        let tmp = TempDir::create("test-ragged-record");
+        let td = TempDir::new().unwrap();
+        let tmp = td.as_ref();
+
         let mut file = File::create(tmp.join("db")).unwrap();
         // First record is complete, second record advertises 5 bytes
         // but contains only 2
@@ -289,7 +294,9 @@ mod test {
 
     #[test]
     fn file_locking() {
-        let tmp = TempDir::create("test-file-locking");
+        let td = TempDir::new().unwrap();
+        let tmp = td.as_ref();
+
         let db = Store::open(tmp.join("db"), false).unwrap();
         assert!(matches!(db, Some(_)));
         drop(db);

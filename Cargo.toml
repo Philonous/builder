@@ -26,6 +26,7 @@ yansi = {version = "1.0.1", features = ["detect-tty", "detect-env"]}
 
 [dev-dependencies]
 insta = { version= "1.47.2", features=["glob", "yaml"] }
+tempfile = "3.27.0"
 
 [profile.dev.package]
 insta.opt-level = 3
