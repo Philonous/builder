@@ -25,7 +25,8 @@ use tracing_subscriber::EnvFilter;
 use crate::{
     error::Errors,
     model::{
-        eval::{self, Resolved},
+        eval::{self, Resolved, ResolvedRef},
+        target::{ModuleId, Modules},
         value::WithDisplayCtxExt,
     },
 };
@@ -105,9 +106,9 @@ fn parse(src: &str) -> parser::parser::Ast<'_> {
 fn resolve<'a>(
     src: &'a str,
     ast: parser::parser::Ast<'a>,
-    workdir: &Path,
+    module: ModuleId,
 ) -> Resolved<lasso::Rodeo> {
-    match ast.resolve(workdir) {
+    match ast.resolve(module) {
         Ok(decls) => decls,
         Err(error::Errors(errs)) => {
             for err in errs {
@@ -148,21 +149,18 @@ pub fn run(
 ) -> Result<Vec<model::target::TargetReport>, error::Spanned<eval::Error>> {
     let request = request.as_ref();
     let ast = parse(&src);
-    let mut resolved = resolve(&src, ast, &cwd);
-    let database = Database::load(
-        cwd.join("build.db"),
-        true,
-        &mut resolved.resolver,
-        &resolved.records,
-    )
-    .unwrap()
-    .unwrap();
+    let mut resolved = resolve(&src, ast, Default::default());
+    let database = Database::load(cwd.join("build.db"), true, &mut resolved)
+        .unwrap()
+        .unwrap();
+    let modules = Modules::new();
     let resolved = Resolved {
-        resolver: resolved.resolver.into_resolver(),
         functions: resolved.functions,
+        resolver: resolved.resolver.into_resolver(),
         records: resolved.records,
         target_types: resolved.target_types,
         targets: resolved.targets,
+        modules,
     };
 
     let target = match resolved.targets.find_by_string(&request) {
@@ -173,13 +171,14 @@ pub fn run(
         }
     };
     let target_type = &resolved[target.kind];
+    let resolved_ref = ResolvedRef::from(&resolved);
     let request = target_type
-        .request_from_name(&resolved, &request)
+        .request_from_name(resolved_ref, &request)
         .expect("construct request from name");
 
-    let mut scheduler = model::target::Scheduler::new(database);
+    let mut scheduler = model::target::Scheduler::new(cwd.to_owned(), database);
 
-    scheduler.demand_all(&resolved, &vec![request])
+    scheduler.demand_all(resolved_ref, &vec![request])
 }
 
 pub fn main() {
@@ -211,7 +210,7 @@ pub fn main() {
             .expect("cwd");
             let src = Arc::new(read_file(&file));
             let ast = parse(&src);
-            let _ = resolve(&src, ast, &cwd);
+            let _ = resolve(&src, ast, Default::default());
             println!("Source file {:?} checked without errors", &file);
         }
         Command::Run { request } => {
@@ -248,7 +247,7 @@ pub fn main() {
             .expect("cwd");
             let src = Arc::new(read_file(&file));
             let ast = parse(&src);
-            let resolved = resolve(&src, ast, &cwd);
+            let resolved = resolve(&src, ast, Default::default());
             for name in resolved.targets.names() {
                 println!("{:?}", name);
             }
@@ -277,7 +276,7 @@ pub fn main() {
             }
             .expect("cwd");
             let ast = parse(&src);
-            let decls = resolve(&src, ast, &cwd);
+            let decls = resolve(&src, ast, Default::default());
             println!("{:?}", decls)
         }
     }

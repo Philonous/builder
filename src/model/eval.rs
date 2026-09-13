@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use lasso::Resolver;
@@ -11,8 +12,10 @@ use super::parameters;
 pub use super::value::{Type, Value};
 use crate::error;
 use crate::error::WithSpan;
+use crate::model::target::Request;
 use crate::model::target::{
-    self, Target, TargetId, TargetType, TargetTypeId, TargetTypes, Targets,
+    self, Module, ModuleId, Modules, Target, TargetId, TargetType,
+    TargetTypeId, TargetTypes, Targets,
 };
 use crate::model::value::display::{DisplayCtx, WithDisplayCtxExt};
 use crate::model::value::record;
@@ -42,6 +45,8 @@ pub enum Error {
     DependencyError(String),
     #[error("Target {0} matches multiple patterns")]
     AmbiguousTarget(String),
+    #[error("Request {0} matches no target")]
+    TargetNotFound(String),
     #[error("Assertion failed: {0}")]
     AssertionFailed(String),
     #[error("Error while handling target database")]
@@ -172,7 +177,7 @@ impl<'a> From<Value> for Expr {
 pub enum Deferrable {
     Deferred {
         target: target::TargetId,
-        request: record::Record,
+        request: Request,
     },
     Immediate(Value),
 }
@@ -191,15 +196,7 @@ impl Deferrable {
                 // dependencies can depend on this value, so they have
                 // to be in a new layer
                 ctx.dependencies.new_layer();
-                ctx.scheduler
-                    .demand(
-                        ctx.resolved,
-                        target::Request {
-                            target: *target,
-                            request: request.clone(),
-                        },
-                    )?
-                    .value
+                ctx.scheduler.demand(ctx.resolved, request.clone())?.value
             }
             Deferrable::Immediate(value) => value.clone(),
         })
@@ -241,13 +238,13 @@ impl Expr {
                                 .to_owned())
                         })
                         .collect::<Result<_, _>>()?,
-                    workdir: ctx.cwd.to_owned(),
+                    workdir: ctx.workdir().to_owned(),
                 };
                 cmd.exe().with_span_from(self.span)?;
                 Value::Unit.into()
             }
             ExprKind::FunApp { fun, args } => {
-                let fun = &ctx.resolved[*fun];
+                let fun = &(ctx.resolved.clone())[*fun];
                 // Functions with observable effects need outstanding
                 // targets to be flushed before they can run
                 if fun.barrier {
@@ -266,16 +263,18 @@ impl Expr {
             ExprKind::Need { request } => {
                 let value =
                     request.eval(ctx)?.force(ctx).with_opt_span(self.span)?;
-                let request =
-                    value.expect_record(&ctx.resolved).without_span()?;
+                let request = Request {
+                    request: value
+                        .expect_record(ctx.resolved)
+                        .without_span()?
+                        .clone(),
+                    module: ctx.module,
+                };
                 // register dependency
                 ctx.dependencies.add(request.clone());
 
-                let target = ctx.scheduler.add(ctx.resolved, request)?;
-                ctx.outstanding.push(target::Request {
-                    target,
-                    request: request.clone(),
-                });
+                let target = ctx.scheduler.add(ctx.resolved, &request)?;
+                ctx.outstanding.push(request.clone());
                 Deferrable::Deferred {
                     target,
                     request: request.clone(),
@@ -305,7 +304,8 @@ impl Expr {
                                 .with_span(*span)?
                                 .force(ctx)
                                 .with_span(*span)?
-                                .to_string_with(ctx.resolved),
+                                .with_ctx(ctx.resolved)
+                                .to_string(),
                         ),
                         StringPart::Lit(cow) => s.push_str(cow),
                     }
@@ -389,27 +389,6 @@ impl<'a> Block {
     }
 }
 
-pub struct EvalContext<'a> {
-    // TODO: constants
-    // Stacked list
-    pub variables: &'a mut Vec<Slots>,
-    pub resolved: &'a Resolved,
-    pub scheduler: &'a mut target::Scheduler,
-    pub dependencies: &'a mut target::Dependencies,
-    pub outstanding: &'a mut Vec<target::Request>,
-    // Working dir relative to which we are working (since process cwd
-    // can't be changed)
-    pub cwd: &'a Path,
-}
-
-impl<'a> Into<DisplayCtx<'a>> for &'a EvalContext<'a> {
-    fn into(self) -> DisplayCtx<'a> {
-        DisplayCtx {
-            resolved: &self.resolved,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct Resolved<R = RodeoResolver> {
     pub functions: Functions,
@@ -417,36 +396,14 @@ pub struct Resolved<R = RodeoResolver> {
     pub records: RecordSchemas,
     pub target_types: TargetTypes,
     pub targets: Targets,
+    pub modules: Modules,
 }
 
-impl<'a> Into<DisplayCtx<'a>> for &'a Resolved {
+impl<'a, R: lasso::Resolver> Into<DisplayCtx<'a>> for &'a Resolved<R> {
     fn into(self) -> DisplayCtx<'a> {
-        DisplayCtx { resolved: self }
-    }
-}
-
-impl<'a> EvalContext<'a> {
-    pub fn enter(&mut self, frame: Slots) -> EvalContext<'_> {
-        self.variables.push(frame);
-        EvalContext {
-            variables: self.variables, // implicit reborrow for the '_ borrow
-            resolved: self.resolved,
-            scheduler: self.scheduler,
-            dependencies: self.dependencies,
-            outstanding: self.outstanding,
-            cwd: self.cwd,
+        DisplayCtx {
+            resolved: self.into(),
         }
-    }
-
-    pub fn flush_dependencies(&mut self) -> Result<(), Error> {
-        // Start a new dependency layer since later dependencies can
-        // depend on the current ones (e.g. by reading from files)
-        self.dependencies.new_layer();
-        for outstanding in std::mem::take(self.outstanding) {
-            tracing::trace!("Flushing dependency: {:?}", outstanding);
-            self.scheduler.demand(self.resolved, outstanding)?;
-        }
-        Ok(())
     }
 }
 
@@ -455,6 +412,14 @@ impl<'a, T> std::ops::Index<FunId> for Resolved<T> {
 
     fn index(&self, index: FunId) -> &Self::Output {
         &self.functions[index]
+    }
+}
+
+impl<'a, T> std::ops::Index<ModuleId> for Resolved<T> {
+    type Output = Module;
+
+    fn index(&self, index: ModuleId) -> &Self::Output {
+        &self.modules[index]
     }
 }
 
@@ -487,6 +452,141 @@ impl<'a, T: Resolver> std::ops::Index<Ident> for Resolved<T> {
 
     fn index(&self, index: Ident) -> &Self::Output {
         &self.resolver.resolve(&index.0)
+    }
+}
+
+// Reference to a `Resolved` that is polymorphic in the interner
+#[derive(Clone, Copy)]
+pub struct ResolvedRef<'a> {
+    pub functions: &'a Functions,
+    pub resolver: &'a dyn lasso::Resolver,
+    pub records: &'a RecordSchemas,
+    pub target_types: &'a TargetTypes,
+    pub targets: &'a Targets,
+    pub modules: &'a Modules,
+}
+
+impl<'a, R: lasso::Resolver> From<&'a Resolved<R>> for ResolvedRef<'a> {
+    fn from(resolved: &'a Resolved<R>) -> Self {
+        ResolvedRef {
+            functions: &resolved.functions,
+            resolver: &resolved.resolver,
+            records: &resolved.records,
+            target_types: &resolved.target_types,
+            targets: &resolved.targets,
+            modules: &resolved.modules,
+        }
+    }
+}
+
+impl<'a> Into<DisplayCtx<'a>> for ResolvedRef<'a> {
+    fn into(self) -> DisplayCtx<'a> {
+        DisplayCtx { resolved: self }
+    }
+}
+
+impl<'a> std::ops::Index<FunId> for ResolvedRef<'a> {
+    type Output = Fun;
+
+    fn index(&self, index: FunId) -> &Self::Output {
+        &self.functions[index]
+    }
+}
+
+impl<'a> std::ops::Index<ModuleId> for ResolvedRef<'a> {
+    type Output = Module;
+
+    fn index(&self, index: ModuleId) -> &Self::Output {
+        &self.modules[index]
+    }
+}
+
+impl<'a> std::ops::Index<RecordId> for ResolvedRef<'a> {
+    type Output = RecordSchema;
+
+    fn index(&self, index: RecordId) -> &Self::Output {
+        &self.records[index]
+    }
+}
+
+impl<'a> std::ops::Index<TargetTypeId> for ResolvedRef<'a> {
+    type Output = TargetType;
+
+    fn index(&self, index: TargetTypeId) -> &Self::Output {
+        &self.target_types[index]
+    }
+}
+
+impl<'a> std::ops::Index<TargetId> for ResolvedRef<'a> {
+    type Output = Target;
+
+    fn index(&self, index: TargetId) -> &Self::Output {
+        &self.targets[index]
+    }
+}
+
+impl<'a> std::ops::Index<Ident> for ResolvedRef<'a> {
+    type Output = str;
+
+    fn index(&self, index: Ident) -> &Self::Output {
+        &self.resolver.resolve(&index.0)
+    }
+}
+
+// impl<'a, R> Into<DisplayCtx<'a, R>> for &'a Resolved<R> {
+//     fn into(self) -> DisplayCtx<'a, R> {
+//         DisplayCtx { resolved: self }
+//     }
+// }
+
+pub struct EvalContext<'a> {
+    // TODO: constants
+    // Stacked list
+    pub variables: &'a mut Vec<Slots>,
+    pub resolved: ResolvedRef<'a>,
+    pub scheduler: &'a mut target::Scheduler,
+    pub dependencies: &'a mut target::Dependencies,
+    pub outstanding: &'a mut Vec<target::Request>,
+    // Current module
+    pub module: target::ModuleId,
+}
+
+impl<'a> Into<DisplayCtx<'a>> for &'a EvalContext<'a> {
+    fn into(self) -> DisplayCtx<'a> {
+        DisplayCtx {
+            resolved: self.resolved,
+        }
+    }
+}
+
+impl<'a> EvalContext<'a> {
+    pub fn enter(&mut self, frame: Slots) -> EvalContext<'_> {
+        self.variables.push(frame);
+        EvalContext {
+            variables: self.variables, // implicit reborrow for the '_ borrow
+            resolved: self.resolved,
+            scheduler: self.scheduler,
+            dependencies: self.dependencies,
+            outstanding: self.outstanding,
+            module: self.module,
+        }
+    }
+
+    pub fn flush_dependencies(&mut self) -> Result<(), Error> {
+        // Start a new dependency layer since later dependencies can
+        // depend on the current ones (e.g. by reading from files)
+        self.dependencies.new_layer();
+        for outstanding in std::mem::take(self.outstanding) {
+            tracing::trace!("Flushing dependency: {:?}", outstanding);
+            self.scheduler.demand(self.resolved, outstanding)?;
+        }
+        Ok(())
+    }
+
+    pub fn workdir(&self) -> PathBuf {
+        self.scheduler
+            .base_dir
+            .join(&self.resolved[self.module].workdir)
     }
 }
 
@@ -708,11 +808,17 @@ pub fn builtin_fun_write_file(interner: &mut Rodeo) -> Fun {
             [path, val, append] => {
                 let path = path.force(ctx)?;
                 let path = path.expect_string(ctx.resolved)?;
-                let real_path = ctx.cwd.join(path);
+                let real_path = ctx.workdir().join(path);
                 let val = val.force(ctx)?;
                 let append = append.force(ctx)?.expect_bool(ctx.resolved)?;
 
                 let mut opts = std::fs::OpenOptions::new();
+
+                tracing::debug!(
+                    "builting write_file: Writing to path {}",
+                    real_path.to_str().unwrap_or("Can't display path")
+                );
+
                 opts.create(true).write(true);
                 if append {
                     opts.append(true);

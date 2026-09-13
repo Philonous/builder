@@ -3,12 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::error::{self};
-use crate::model::eval::RecordId;
+use crate::model::eval::{self};
 use crate::model::parameters::Arguments;
-use crate::model::value::{Ident, Record, RecordSchema, RecordSchemas};
+use crate::model::target::{ModuleId, Request};
+use crate::model::value::{Ident, Record};
 use crate::{
     model::{
-        eval::{Resolved, Value},
+        eval::{Resolved, ResolvedRef, Value},
         target::{FastTrace, Trace},
         value::record,
     },
@@ -23,69 +24,48 @@ pub enum Error {
     IOError(#[from] std::io::Error),
     #[error("Error reconstructing record")]
     Record,
+    #[error("Database includes module {0} which is not known")]
+    Module(String),
+    #[error("Database refers to target {0} which is not known")]
+    Target(String),
     #[error("Error reading database")]
     Database,
+    #[error("{0}")]
+    Eval(#[from] eval::Error),
 }
 
-#[derive(Clone, Copy)]
-struct Resolver<'a> {
-    resolver: &'a dyn lasso::Resolver,
-    records: &'a RecordSchemas,
-}
+type Resolver = Resolved<Rodeo>;
 
-impl<'a> From<&'a Resolved> for Resolver<'a> {
-    fn from(resolved: &'a Resolved) -> Self {
-        Resolver {
-            resolver: &resolved.resolver,
-            records: &resolved.records,
-        }
-    }
-}
-
-impl<'a> std::ops::Index<Ident> for Resolver<'a> {
-    type Output = str;
-
-    fn index(&self, index: Ident) -> &Self::Output {
-        &self.resolver.resolve(&index.0)
-    }
-}
-
-impl<'a> std::ops::Index<RecordId> for Resolver<'a> {
-    type Output = RecordSchema;
-
-    fn index(&self, index: RecordId) -> &Self::Output {
-        &self.records[index]
+impl Resolver {
+    fn intern(&mut self, s: &str) -> Ident {
+        Ident(self.resolver.get_or_intern(s))
     }
 }
 
 // Helper types that can be serialized
-#[derive(Debug, Serialize, Deserialize, Hash)]
+#[derive(Debug, Serialize, Deserialize, Hash, Clone)]
 pub enum SerializedValue {
-    Unit,
-    String(String),
-    Record(SerializedRecord),
-    Int(i64),
     Bool(bool),
+    Int(i64),
+    Record(SerializedRecord),
+    String(String),
+    Unit,
 }
 
 impl SerializedValue {
-    pub fn resolve(
-        self,
-        interner: &mut Rodeo,
-        records: &RecordSchemas,
-    ) -> Result<Value, Error> {
+    pub fn resolve(self, resolver: &mut Resolver) -> Result<Value, Error> {
         Ok(match self {
             SerializedValue::Unit => Value::Unit,
             SerializedValue::String(s) => Value::String(s),
             SerializedValue::Record(record) => {
-                Value::Record(record.resolve(interner, records)?)
+                Value::Record(record.resolve(resolver)?)
             }
             SerializedValue::Int(i) => Value::Int(i),
             SerializedValue::Bool(b) => Value::Bool(b),
         })
     }
 
-    fn from_resolved(v: &Value, resolved: Resolver) -> Self {
+    fn from_resolved(v: &Value, resolved: ResolvedRef<'_>) -> Self {
         match v {
             Value::Unit => Self::Unit,
             Value::String(s) => Self::String(s.clone()),
@@ -98,7 +78,7 @@ impl SerializedValue {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Hash)]
+#[derive(Debug, Serialize, Deserialize, Hash, Clone)]
 pub struct SerializedRecord {
     name: String,
     values: Vec<(String, SerializedValue)>,
@@ -106,37 +86,37 @@ pub struct SerializedRecord {
 
 impl SerializedRecord {
     pub fn resolve(
-        self,
-        interner: &mut Rodeo,
-        records: &RecordSchemas,
+        &self,
+        resolver: &mut Resolver,
     ) -> Result<record::Record, Error> {
         // Intern record name
-        let ident = Ident(interner.get_or_intern(&self.name));
-        // Look up schema
-        let Some((schema_id, schema)) = records.find(ident) else {
-            return Err(Error::Record);
-        };
+        let ident = resolver.intern(&self.name);
         // resolve fields
         let arguments = Arguments {
             positional: Vec::new(),
             key_value: self
                 .values
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(
                     |(k, v)| -> Result<error::Spanned<(Ident, Value)>, Error> {
-                        let ident = Ident(interner.get_or_intern(k));
+                        let ident = resolver.intern(&k);
                         Ok(error::Spanned {
-                            inner: (ident, v.resolve(interner, records)?),
+                            inner: (ident, v.resolve(resolver)?),
                             span: None,
                         })
                     },
                 )
                 .collect::<Result<Vec<_>, Error>>()?,
         };
+        // Look up schema
+        let Some((schema_id, schema)) = resolver.records.find(ident) else {
+            return Err(Error::Record);
+        };
         let values = schema
             .fields
             .match_arguments(
-                interner,
+                &resolver.resolver,
                 error::Spanned {
                     inner: &arguments,
                     span: None,
@@ -148,10 +128,8 @@ impl SerializedRecord {
             values,
         })
     }
-}
 
-impl SerializedRecord {
-    fn from_resolved(r: &Record, resolved: Resolver) -> Self {
+    fn from_resolved(r: &Record, resolved: ResolvedRef<'_>) -> Self {
         Self {
             name: resolved[resolved[r.schema].name].to_owned(),
             values: resolved[r.schema]
@@ -170,42 +148,112 @@ impl SerializedRecord {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Hash)]
+pub struct SerializedRequest {
+    module: SerializedModule,
+    request: SerializedRecord,
+}
+
+impl SerializedRequest {
+    pub fn resolve(self, resolved: &mut Resolver) -> Result<Request, Error> {
+        Ok(Request {
+            module: self.module.resolve(resolved)?,
+            request: self.request.resolve(resolved)?,
+        })
+    }
+
+    fn from_resolved(r: &Request, resolved: ResolvedRef<'_>) -> Self {
+        Self {
+            module: SerializedModule::from_resolved(r.module, resolved),
+            request: SerializedRecord::from_resolved(&r.request, resolved),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Hash)]
+struct SerializedModule(Vec<String>);
+
+impl std::fmt::Display for SerializedModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut iter = self.0.iter();
+        if let Some(root) = iter.next() {
+            write!(f, ":{}", root)?;
+            for i in self.0.iter() {
+                write!(f, ":{}", i)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SerializedModule {
+    pub fn resolve(self, resolver: &mut Resolver) -> Result<ModuleId, Error> {
+        // Intern record name
+        let name: Vec<Ident> =
+            self.0.iter().map(|nm| resolver.intern(nm)).collect();
+        resolver
+            .modules
+            .find(&name)
+            .ok_or_else(|| Error::Module(self.to_string()))
+    }
+
+    fn from_resolved(mid: ModuleId, resolved: ResolvedRef<'_>) -> Self {
+        Self(
+            resolved[mid]
+                .name
+                .iter()
+                .map(|name| resolved[*name].to_owned())
+                .collect(),
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Hash)]
 pub struct SerializedDatabaseEntry {
+    pub module: SerializedModule,
     pub target: SerializedRecord,
     pub fast_trace: Option<FastTrace>,
     pub trace: Option<Trace>,
     pub result: SerializedValue,
-    pub dependencies: Vec<Vec<SerializedRecord>>,
+    pub dependencies: Vec<Vec<SerializedRequest>>,
 }
 
 impl SerializedDatabaseEntry {
     pub fn resolve(
         self,
-        interner: &mut Rodeo,
-        records: &RecordSchemas,
+        resolver: &mut Resolver,
     ) -> Result<DatabaseEntry, Error> {
         Ok(DatabaseEntry {
-            target: self.target.resolve(interner, records)?,
+            request: Request {
+                module: self.module.resolve(resolver)?,
+                request: self.target.resolve(resolver)?,
+            },
             fast_trace: self.fast_trace,
             trace: self.trace,
-            result: self.result.resolve(interner, records)?,
+            result: self.result.resolve(resolver)?,
             dependencies: self
                 .dependencies
                 .into_iter()
                 .map(|group| {
                     group
                         .into_iter()
-                        .map(|d| d.resolve(interner, records))
+                        .map(|d| d.resolve(resolver))
                         .collect::<Result<_, Error>>()
                 })
                 .collect::<Result<_, Error>>()?,
         })
     }
 
-    fn from_resolved(dbe: &DatabaseEntry, resolved: Resolver) -> Self {
+    fn from_resolved(dbe: &DatabaseEntry, resolved: ResolvedRef<'_>) -> Self {
         SerializedDatabaseEntry {
-            target: SerializedRecord::from_resolved(&dbe.target, resolved),
+            module: SerializedModule::from_resolved(
+                dbe.request.module,
+                resolved,
+            ),
+            target: SerializedRecord::from_resolved(
+                &dbe.request.request,
+                resolved,
+            ),
             fast_trace: dbe.fast_trace.clone(),
             trace: dbe.trace.clone(),
             result: SerializedValue::from_resolved(&dbe.result, resolved),
@@ -215,7 +263,7 @@ impl SerializedDatabaseEntry {
                 .map(|group| {
                     group
                         .iter()
-                        .map(|r| SerializedRecord::from_resolved(r, resolved))
+                        .map(|r| SerializedRequest::from_resolved(r, resolved))
                         .collect()
                 })
                 .collect(),
@@ -225,7 +273,7 @@ impl SerializedDatabaseEntry {
 
 #[derive(Debug, Clone)]
 pub struct DatabaseEntry {
-    pub target: record::Record,
+    pub request: Request,
     pub fast_trace: Option<FastTrace>,
     pub trace: Option<Trace>,
     pub result: Value,
@@ -233,12 +281,12 @@ pub struct DatabaseEntry {
     // dependencies in later laters may depend on dependencies in
     // earlier layers. Dependencies in the same layer are independent
     // and be handled in parallel
-    pub dependencies: Vec<Vec<record::Record>>,
+    pub dependencies: Vec<Vec<Request>>,
 }
 
 pub struct Database {
     store: store::Store,
-    entries: HashMap<record::Record, DatabaseEntry>,
+    entries: HashMap<Request, DatabaseEntry>,
     duplicates: usize,
 }
 
@@ -246,8 +294,7 @@ impl Database {
     pub fn load(
         path: impl AsRef<std::path::Path>,
         block: bool,
-        interner: &mut Rodeo,
-        records: &RecordSchemas,
+        resolved: &mut Resolver,
     ) -> Result<Option<Self>, Error> {
         let Some(mut store) = store::Store::open(path, block)? else {
             return Ok(None);
@@ -273,9 +320,9 @@ impl Database {
                     }
                 };
             tracing::debug!("Read db Entry: {:?}", serialized_entry);
-            let entry = serialized_entry.resolve(interner, records)?;
+            let entry = serialized_entry.resolve(resolved)?;
 
-            if let Some(_) = entries.insert(entry.target.clone(), entry) {
+            if let Some(_) = entries.insert(entry.request.clone(), entry) {
                 duplicates += 1;
             }
         }
@@ -292,23 +339,23 @@ impl Database {
     pub fn add(
         &mut self,
         entry: DatabaseEntry,
-        resolved: &Resolved,
+        resolved: ResolvedRef<'_>,
     ) -> Result<(), Error> {
         let serialized = postcard::to_stdvec(
-            &SerializedDatabaseEntry::from_resolved(&entry, resolved.into()),
+            &SerializedDatabaseEntry::from_resolved(&entry, resolved),
         )
         .unwrap();
         self.store.append_record(&serialized)?;
-        if let Some(_) = self.entries.insert(entry.target.clone(), entry) {
+        if let Some(_) = self.entries.insert(entry.request.clone(), entry) {
             self.duplicates += 1;
             if self.duplicates > self.entries.len() {
-                self.compact(resolved.into())?
+                self.compact(resolved)?
             }
         }
         Ok(())
     }
 
-    fn compact(&mut self, resolved: Resolver) -> Result<(), Error> {
+    fn compact(&mut self, resolved: ResolvedRef<'_>) -> Result<(), Error> {
         let mut path = self.store.path.clone();
         path.add_extension("tmp");
         // Create new empty store as temporary file
@@ -332,7 +379,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn get(&self, request: &record::Record) -> Option<&DatabaseEntry> {
+    pub fn get(&self, request: &Request) -> Option<&DatabaseEntry> {
         self.entries.get(request)
     }
 }

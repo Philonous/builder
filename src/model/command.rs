@@ -10,7 +10,7 @@ impl<'a> std::fmt::Display for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.executable)?;
         for arg in self.args.iter() {
-            write!(f, " {}", arg)?;
+            write!(f, r#" "{}""#, arg)?;
         }
         Ok(())
     }
@@ -33,7 +33,11 @@ impl<'a> Command {
             proc.arg(&**arg);
         }
 
-        eprintln!("build: {}", self);
+        eprintln!(
+            r#"build: {} in "{}""#,
+            self,
+            self.workdir.to_str().unwrap_or("N/A")
+        );
         // Execute command
         match proc.status() {
             Ok(status) => {

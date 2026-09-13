@@ -6,7 +6,9 @@ use super::model::{eval, parameters, target};
 use super::parser::parser;
 use crate::error::{self, AddErrors, Errors, Spanned, WithSpan};
 use crate::model::eval::{Functions, SlotState, Slots};
-use crate::model::target::{TargetType, TargetTypeId, TargetTypes, Targets};
+use crate::model::target::{
+    ModuleId, TargetType, TargetTypeId, TargetTypes, Targets,
+};
 use crate::model::value::{Ident, RecordPattern, RecordSchemas};
 use crate::parser::string::QuoteError;
 
@@ -159,7 +161,7 @@ pub struct Ctx<'fs> {
     pub functions: &'fs Functions,
     pub records: &'fs RecordSchemas,
     pub target_types: &'fs TargetTypes,
-    pub workdir: &'fs Path,
+    pub module: ModuleId,
     // todo: constants
 }
 
@@ -616,7 +618,7 @@ impl<'a> parser::Decl<'a> {
             block,
             slots,
             matchers,
-            workdir: ctx.workdir.to_owned(),
+            module: ctx.module,
         };
 
         errors.ok(target)
@@ -731,7 +733,7 @@ fn register_builtin_target_types(
 impl<'a> parser::Ast<'a> {
     pub fn resolve(
         self,
-        workdir: &'a Path,
+        module: ModuleId,
     ) -> Result<eval::Resolved<Rodeo>, Errors<Error>> {
         let mut errors = Errors::empty();
 
@@ -755,7 +757,7 @@ impl<'a> parser::Ast<'a> {
             functions: &functions,
             records: &records,
             target_types: &target_types,
-            workdir,
+            module,
         };
         for decl in self.decls {
             let t = decl
@@ -775,6 +777,7 @@ impl<'a> parser::Ast<'a> {
             records,
             target_types,
             targets,
+            modules: target::Modules::new(),
         })
     }
 }

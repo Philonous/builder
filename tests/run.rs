@@ -19,7 +19,7 @@ fn simple_run() {
     let p = Project::new(
         r#"
 target file("1") {
-  write_file("1", "test");
+  write_file("1", "write_file");
 }
     "#,
     );
@@ -28,7 +28,7 @@ target file("1") {
     r.assert_ok();
 
     assert_eq!(r.status("./1"), Status::Ok);
-    assert_eq!(p.read("1"), "test");
+    assert_eq!(p.read("1"), "write_file");
 }
 
 #[test]

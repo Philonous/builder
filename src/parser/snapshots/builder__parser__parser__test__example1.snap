@@ -6,115 +6,265 @@ input_file: src/parser/test/parser/example1.in
 Ok(
     Ast {
         decls: [
-            Decl {
-                header: AtDecl(
-                    Ident(
-                        "dist/exe",
-                    ),
+            Target {
+                args: LitArguments(
+                    [],
                 ),
-                definition: [
-                    Let(
-                        Ident(
-                            "exe",
-                        ),
-                        Lit(
-                            String(
-                                "target/\"build\"/exe",
-                            ),
-                        ),
-                    ),
-                    Expr(
-                        FunApp(
-                            Ident(
-                                "need",
-                            ),
-                            [
-                                Lit(
-                                    String(
-                                        "Cargo.toml",
-                                    ),
+                ident: AtTarget(
+                    "dist/exe",
+                ),
+                block: Block {
+                    statements: [
+                        Let(
+                            Spanned {
+                                inner: Ident(
+                                    "exe",
                                 ),
-                                Lit(
-                                    String(
-                                        "Cargo.lock",
+                                span: 57..60,
+                            },
+                            Expr(
+                                Spanned {
+                                    inner: Lit(
+                                        String(
+                                            Quoted {
+                                                delim: '"',
+                                                raw: "target/\\\"build\\\"/exe",
+                                            },
+                                        ),
                                     ),
-                                ),
-                            ],
-                        ),
-                    ),
-                    Expr(
-                        FunApp(
-                            Ident(
-                                "need",
+                                    span: 63..85,
+                                },
                             ),
-                            [
-                                FunApp(
-                                    Ident(
-                                        "glob",
-                                    ),
-                                    [
-                                        Lit(
-                                            String(
-                                                "src/**/*",
+                        ),
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Need(
+                                        NeedExpr(
+                                            Expr(
+                                                Spanned {
+                                                    inner: Lit(
+                                                        String(
+                                                            Quoted {
+                                                                delim: '"',
+                                                                raw: "Cargo.toml",
+                                                            },
+                                                        ),
+                                                    ),
+                                                    span: 133..145,
+                                                },
                                             ),
                                         ),
-                                    ],
-                                ),
-                            ],
-                        ),
-                    ),
-                    Expr(
-                        Lit(
-                            Backticks(
-                                "cargo build",
+                                    ),
+                                    span: 128..146,
+                                },
                             ),
                         ),
-                    ),
-                ],
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Need(
+                                        NeedExpr(
+                                            Expr(
+                                                Spanned {
+                                                    inner: Lit(
+                                                        String(
+                                                            Quoted {
+                                                                delim: '"',
+                                                                raw: "Cargo.lock",
+                                                            },
+                                                        ),
+                                                    ),
+                                                    span: 155..167,
+                                                },
+                                            ),
+                                        ),
+                                    ),
+                                    span: 150..168,
+                                },
+                            ),
+                        ),
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Need(
+                                        NeedExpr(
+                                            Expr(
+                                                Spanned {
+                                                    inner: FunApp(
+                                                        Ident(
+                                                            "glob",
+                                                        ),
+                                                        Spanned {
+                                                            inner: Arguments(
+                                                                [
+                                                                    Spanned {
+                                                                        inner: Bare(
+                                                                            Expr(
+                                                                                Spanned {
+                                                                                    inner: Lit(
+                                                                                        String(
+                                                                                            Quoted {
+                                                                                                delim: '"',
+                                                                                                raw: "src/**/*",
+                                                                                            },
+                                                                                        ),
+                                                                                    ),
+                                                                                    span: 224..234,
+                                                                                },
+                                                                            ),
+                                                                        ),
+                                                                        span: 224..234,
+                                                                    },
+                                                                ],
+                                                            ),
+                                                            span: 223..235,
+                                                        },
+                                                    ),
+                                                    span: 219..235,
+                                                },
+                                            ),
+                                        ),
+                                    ),
+                                    span: 214..236,
+                                },
+                            ),
+                        ),
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Command(
+                                        Command {
+                                            executable: BareString(
+                                                Spanned {
+                                                    inner: "cargo",
+                                                    span: 303..308,
+                                                },
+                                            ),
+                                            args: [
+                                                BareString(
+                                                    Spanned {
+                                                        inner: "build",
+                                                        span: 309..314,
+                                                    },
+                                                ),
+                                            ],
+                                        },
+                                    ),
+                                    span: 302..315,
+                                },
+                            ),
+                        ),
+                    ],
+                    returns_last_value: true,
+                },
             },
-            Decl {
-                header: Explicit(
-                    FunApp(
-                        Ident(
-                            "target",
+            Target {
+                args: LitArguments(
+                    [],
+                ),
+                ident: Normal {
+                    name: Spanned {
+                        inner: Ident(
+                            "docker",
                         ),
+                        span: 327..333,
+                    },
+                    pattern: Patterns(
                         [
-                            Ident(
-                                Ident(
-                                    "docker-image",
-                                ),
-                            ),
+                            Spanned {
+                                inner: Named {
+                                    name: Ident(
+                                        "image",
+                                    ),
+                                    pattern: Lit(
+                                        String(
+                                            Quoted {
+                                                delim: '"',
+                                                raw: "app",
+                                            },
+                                        ),
+                                    ),
+                                },
+                                span: 334..347,
+                            },
                         ],
                     ),
-                    Lit(
-                        String(
-                            "app",
-                        ),
-                    ),
-                ),
-                definition: [
-                    Expr(
-                        FunApp(
-                            Ident(
-                                "need",
-                            ),
-                            [
-                                Lit(
-                                    String(
-                                        "dist/exe",
+                },
+                block: Block {
+                    statements: [
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Need(
+                                        NeedExpr(
+                                            Expr(
+                                                Spanned {
+                                                    inner: Lit(
+                                                        String(
+                                                            Quoted {
+                                                                delim: '"',
+                                                                raw: "dist/exe",
+                                                            },
+                                                        ),
+                                                    ),
+                                                    span: 358..368,
+                                                },
+                                            ),
+                                        ),
                                     ),
-                                ),
-                            ],
-                        ),
-                    ),
-                    Expr(
-                        Lit(
-                            Backticks(
-                                "docker build -t ${target}",
+                                    span: 353..369,
+                                },
                             ),
                         ),
-                    ),
-                ],
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Command(
+                                        Command {
+                                            executable: BareString(
+                                                Spanned {
+                                                    inner: "docker",
+                                                    span: 445..451,
+                                                },
+                                            ),
+                                            args: [
+                                                BareString(
+                                                    Spanned {
+                                                        inner: "build",
+                                                        span: 452..457,
+                                                    },
+                                                ),
+                                                BareString(
+                                                    Spanned {
+                                                        inner: "-t",
+                                                        span: 458..460,
+                                                    },
+                                                ),
+                                                String(
+                                                    StringExpr(
+                                                        [
+                                                            Splice(
+                                                                Spanned {
+                                                                    inner: Ident(
+                                                                        "target",
+                                                                    ),
+                                                                    span: 462..470,
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                ),
+                                            ],
+                                        },
+                                    ),
+                                    span: 444..472,
+                                },
+                            ),
+                        ),
+                    ],
+                    returns_last_value: true,
+                },
             },
         ],
     },

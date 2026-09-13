@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use lasso::Rodeo;
 
-use crate::model::eval::{RecordId, Resolved};
+use crate::model::eval::{RecordId, Resolved, ResolvedRef};
 use crate::model::value::display::WithDisplayCtxExt as _;
 use crate::model::value::DisplayWith;
 
@@ -81,11 +81,11 @@ pub struct Record {
     pub values: Vec<Value>,
 }
 
-impl<'a> DisplayWith for Record {
-    fn fmt(
+impl DisplayWith for Record {
+    fn fmt<'a>(
         &self,
         f: &mut std::fmt::Formatter<'_>,
-        resolved: &Resolved,
+        resolved: ResolvedRef<'a>,
     ) -> std::fmt::Result {
         let schema = &resolved[self.schema];
         schema.name.with_ctx(resolved).fmt(f)?;

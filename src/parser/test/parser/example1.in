@@ -1,10 +1,11 @@
-@dist/exe {
+target @dist/exe {
 
   # Declare variable for reuse
   let exe = "target/\"build\"/exe";
 
   # Need accepts one ore more targets
-  need("Cargo.toml", "Cargo.lock");
+  need("Cargo.toml");
+  need("Cargo.lock");
   # glob returns a list of matching files
   need(glob("src/**/*"));
 
@@ -14,10 +15,10 @@
 
 }
 
-target(docker-image) "app" {
+target docker(image = "app") {
   need("dist/exe");
 
   # Tag is inherited from resource, ${} is variable use/interpolation
-  `docker build -t "${target}"`
+  `docker build -t "{target}"`
 
 }

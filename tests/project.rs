@@ -1,5 +1,20 @@
+use std::sync::LazyLock;
+
 use builder;
 use builder::model::target::{ReportResult, TargetReport};
+use tracing_subscriber::EnvFilter;
+
+static TRACING: LazyLock<()> = LazyLock::new(|| {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::builder().from_env_lossy()) // RUST_LOG=builder=debug
+        .with_target(false)
+        .with_test_writer()
+        .init();
+});
+
+fn init_tracing() {
+    LazyLock::force(&TRACING);
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Status {
@@ -58,6 +73,7 @@ pub struct Project {
 
 impl Project {
     pub fn new(buildfile: impl AsRef<str>) -> Self {
+        init_tracing();
         let dir = tempfile::tempdir().expect("temporary directory");
         let this = Self { dir };
         this.write("Buildfile", buildfile.as_ref());

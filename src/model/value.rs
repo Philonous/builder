@@ -4,13 +4,19 @@ pub mod serialize;
 
 use std::fmt;
 
-use super::eval::{self, Resolved};
+use super::eval::{self, Resolved, ResolvedRef};
 pub use display::{DisplayWith, WithDisplayCtxExt};
 use lasso::Spur;
 pub use record::{Record, RecordPattern, RecordSchema, RecordSchemas};
 
 #[derive(Eq, Hash, PartialEq, Debug, Clone, Copy)]
 pub struct Ident(pub Spur);
+
+impl From<Spur> for Ident {
+    fn from(value: Spur) -> Self {
+        Self(value)
+    }
+}
 
 impl Default for Ident {
     fn default() -> Self {
@@ -19,7 +25,11 @@ impl Default for Ident {
 }
 
 impl DisplayWith for Ident {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Resolved) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        ctx: ResolvedRef<'_>,
+    ) -> fmt::Result {
         write!(f, "{}", &ctx[*self])
     }
 }
@@ -68,7 +78,7 @@ impl Value {
 
     pub fn expect_string(
         &self,
-        resolved: &Resolved,
+        resolved: ResolvedRef<'_>,
     ) -> Result<&str, eval::Error> {
         match self {
             Self::String(s) => Ok(&s),
@@ -82,7 +92,7 @@ impl Value {
 
     pub fn expect_bool(
         &self,
-        resolved: &Resolved,
+        resolved: ResolvedRef<'_>,
     ) -> Result<bool, eval::Error> {
         match self {
             Self::Bool(s) => Ok(*s),
@@ -96,7 +106,7 @@ impl Value {
 
     pub fn expect_record(
         &self,
-        resolved: &Resolved,
+        resolved: ResolvedRef<'_>,
     ) -> Result<&Record, eval::Error> {
         match self {
             Self::Record(r) => Ok(&r),
@@ -110,7 +120,11 @@ impl Value {
 }
 
 impl DisplayWith for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Resolved) -> fmt::Result {
+    fn fmt(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        ctx: ResolvedRef<'_>,
+    ) -> fmt::Result {
         match self {
             Value::Unit => write!(f, "()"),
             Value::String(s) => write!(f, "{}", s),

@@ -57,13 +57,13 @@ pub enum TraceFun {
     Builtin {
         // Return of None means resource does not exist
         fast: fn(
-            &record::Record,
-            &eval::Resolved,
+            &Request,
+            eval::ResolvedRef<'_>,
             &Path,
         ) -> Result<Option<FastTrace>, eval::Error>,
         trace: fn(
-            &record::Record,
-            &eval::Resolved,
+            &Request,
+            eval::ResolvedRef<'_>,
             &Path,
         ) -> Result<Option<Trace>, eval::Error>,
     },
@@ -73,8 +73,8 @@ pub enum TraceFun {
 pub enum DisplFun {
     Builtin {
         fmt: fn(
-            &record::Record,
-            &eval::Resolved,
+            &Request,
+            eval::ResolvedRef<'_>,
             &mut std::fmt::Formatter,
         ) -> std::fmt::Result,
     },
@@ -83,12 +83,13 @@ pub enum DisplFun {
 impl DisplFun {
     pub fn fmt(
         &self,
-        record: &record::Record,
-        resolved: &eval::Resolved,
+        // TODO
+        request: &Request,
+        resolved: eval::ResolvedRef<'_>,
         f: &mut std::fmt::Formatter,
     ) -> std::fmt::Result {
         match self {
-            Self::Builtin { fmt } => fmt(record, resolved, f),
+            Self::Builtin { fmt } => fmt(request, resolved, f),
         }
     }
 }
@@ -110,23 +111,23 @@ impl std::fmt::Debug for DisplFun {
 impl TraceFun {
     fn fast(
         &self,
-        resolved: &eval::Resolved,
-        request: &record::Record,
-        workdir: &Path,
+        request: &Request,
+        resolved: eval::ResolvedRef<'_>,
+        base_dir: &Path,
     ) -> Result<Option<FastTrace>, eval::Error> {
         match self {
-            TraceFun::Builtin { fast, .. } => fast(request, resolved, workdir),
+            TraceFun::Builtin { fast, .. } => fast(request, resolved, base_dir),
         }
     }
     fn trace(
         &self,
-        resolved: &eval::Resolved,
-        request: &record::Record,
-        workdir: &Path,
+        request: &Request,
+        resolved: eval::ResolvedRef<'_>,
+        base_dir: &Path,
     ) -> Result<Option<Trace>, eval::Error> {
         match self {
             TraceFun::Builtin { trace, .. } => {
-                trace(request, resolved, workdir)
+                trace(request, resolved, base_dir)
             }
         }
     }
@@ -144,6 +145,52 @@ impl Default for TraceFun {
 impl std::fmt::Debug for TraceFun {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "<TraceFun>")
+    }
+}
+
+#[derive(Debug, Default, PartialOrd, PartialEq, Ord, Eq, Clone, Copy, Hash)]
+pub struct ModuleId(usize);
+
+#[derive(Debug, Default, Clone)]
+pub struct Module {
+    pub name: Vec<Ident>,
+    pub workdir: PathBuf,
+}
+
+impl DisplayWith for Module {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        resolved: eval::ResolvedRef<'_>,
+    ) -> std::fmt::Result {
+        for i in self.name.iter() {
+            write!(f, "{}:", &resolved[*i])?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct Modules(Vec<Module>);
+
+impl Modules {
+    pub fn new() -> Self {
+        // Instantiate with root module as default
+        Modules(vec![Module {
+            name: Vec::with_capacity(0),
+            workdir: PathBuf::from("."),
+        }])
+    }
+    pub fn find(&self, name: &[Ident]) -> Option<ModuleId> {
+        self.0.iter().position(|md| md.name == name).map(ModuleId)
+    }
+}
+
+impl std::ops::Index<ModuleId> for Modules {
+    type Output = Module;
+
+    fn index(&self, index: ModuleId) -> &Self::Output {
+        &self.0[index.0 as usize]
     }
 }
 
@@ -170,9 +217,9 @@ impl TargetType {
     /// Construct the request record from the name (e.g. from CLI)
     pub fn request_from_name(
         &self,
-        resolved: &eval::Resolved,
+        resolved: eval::ResolvedRef<'_>,
         name: &str,
-    ) -> Option<record::Record> {
+    ) -> Option<Request> {
         let schema = &resolved[self.request_schema];
         let mut values = Vec::with_capacity(schema.fields.0.len());
         for (ix, (_ident, param)) in schema.fields.0.iter().enumerate() {
@@ -183,15 +230,24 @@ impl TargetType {
             };
             values.push(v);
         }
-        Some(record::Record {
-            schema: self.request_schema,
-            values,
+        Some(Request {
+            request: record::Record {
+                schema: self.request_schema,
+                values,
+            },
+            module: ModuleId(0),
         })
     }
 }
 
 #[derive(Debug, Default)]
 pub struct TargetTypes(Vec<TargetType>);
+
+impl TargetTypes {
+    pub fn find_by_record(&self, r: &record::Record) -> Option<&TargetType> {
+        self.0.iter().find(|tt| tt.request_schema == r.schema)
+    }
+}
 
 impl std::ops::Index<TargetTypeId> for TargetTypes {
     type Output = TargetType;
@@ -245,8 +301,12 @@ impl TargetTypes {
 }
 
 const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
-    fast: |rec, resolved, workdir| {
-        let path = workdir.join(rec.values[0].expect_string(resolved)?);
+    fast: |request, resolved, base_dir| {
+        let module = &resolved[request.module];
+        let rec = &request.request;
+        let path = base_dir
+            .join(module.workdir.join(rec.values[0].expect_string(resolved)?));
+
         let meta = match std::fs::metadata(path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -266,8 +326,15 @@ const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
             ),
         }))
     },
-    trace: |rec, resolved, workdir| {
-        let path = workdir.join(rec.values[0].expect_string(resolved)?);
+    trace: |request, resolved, base_dir| {
+        let module = &resolved[request.module];
+        let rec = &request.request;
+        let path = base_dir
+            .join(module.workdir.join(rec.values[0].expect_string(resolved)?));
+        tracing::debug!(
+            "FILE_TRACE_FUN: tracing {}",
+            path.to_str().unwrap_or("can't display path")
+        );
         let file = match std::fs::File::open(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -289,8 +356,16 @@ const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
 };
 
 const FILE_DISPL_FUN: DisplFun = DisplFun::Builtin {
-    fmt: |record, resolved, f| {
-        write!(f, "./{}", record.values[0].expect_string(resolved).unwrap())
+    fmt: |request, resolved, f| {
+        let module = &resolved[request.module];
+        if module.name.len() > 0 {
+            write!(f, "{}:", module.with_ctx(resolved))?;
+        }
+        write!(
+            f,
+            "./{}",
+            request.request.values[0].expect_string(resolved).unwrap()
+        )
     },
 };
 
@@ -315,8 +390,14 @@ pub fn register_target_type_file(
 }
 
 const TASK_DISPL_FUN: DisplFun = DisplFun::Builtin {
-    fmt: |record, resolved, f| {
-        write!(f, ":{}", record.values[0].expect_string(resolved).unwrap())
+    fmt: |request, resolved, f| {
+        let module = &resolved[request.module];
+        write!(
+            f,
+            "{}:{}",
+            module.with_ctx(resolved),
+            request.request.values[0].expect_string(resolved).unwrap()
+        )
     },
 };
 
@@ -362,12 +443,12 @@ pub struct Target {
     // into slot i
     pub matchers: Vec<usize>,
     pub block: eval::Block,
-    pub workdir: PathBuf,
+    pub module: ModuleId,
 }
 
 // List of independent dependencies (each group can be run in parallel)
 #[derive(Debug)]
-pub struct Dependencies(Vec<Vec<record::Record>>);
+pub struct Dependencies(Vec<Vec<Request>>);
 
 impl Dependencies {
     // Invariants
@@ -376,7 +457,7 @@ impl Dependencies {
     pub fn new() -> Self {
         Dependencies(vec![vec![]])
     }
-    pub fn add(&mut self, dep: record::Record) {
+    pub fn add(&mut self, dep: Request) {
         self.0.last_mut().unwrap().push(dep);
         tracing::trace!("Added outstanding dependency, deps now: {:?}", self.0);
     }
@@ -396,9 +477,9 @@ impl Target {
     // (Only) Run the code
     pub fn execute(
         &self,
-        resolved: &eval::Resolved,
+        resolved: eval::ResolvedRef<'_>,
         scheduler: &mut Scheduler,
-        request: &record::Record,
+        request: &Request,
     ) -> Result<(Value, Dependencies), error::Spanned<eval::Error>> {
         let mut variables = Default::default();
         let mut dependencies: Dependencies = Dependencies::new();
@@ -410,13 +491,13 @@ impl Target {
                 scheduler,
                 dependencies: &mut dependencies,
                 outstanding: &mut outstanding,
-                cwd: self.workdir.as_ref(),
+                module: self.module,
             };
             // Fill in variables with record elements
             let mut slots = self.slots.clone();
             for (to, from) in self.matchers.iter().enumerate() {
                 slots.0[to].value = eval::SlotState::Value(
-                    request.values[*from].clone().into(),
+                    request.request.values[*from].clone().into(),
                 );
             }
             let res = {
@@ -447,7 +528,7 @@ impl Target {
     /// dependencies are clean
     fn all_deps_clean(
         scheduler: &mut Scheduler,
-        resolved: &eval::Resolved,
+        resolved: eval::ResolvedRef<'_>,
         tgt: &str,
         c: &DatabaseEntry,
     ) -> Result<bool, error::Spanned<eval::Error>> {
@@ -460,9 +541,10 @@ impl Target {
             let mut outstanding = Vec::new();
             // First schedule all dependencies
             for request in layer {
+                scheduler.add(resolved, request)?;
                 outstanding.push(Request {
-                    target: scheduler.add(resolved, &request)?,
-                    request: request.clone(),
+                    module: request.module,
+                    request: request.request.clone(),
                 });
             }
             // Now demand them (splitting schedule/demand
@@ -488,23 +570,18 @@ impl Target {
 
     fn run(
         &self,
-        resolved: &eval::Resolved,
+        resolved: eval::ResolvedRef<'_>,
         scheduler: &mut Scheduler,
-        request: &record::Record,
+        request: &Request,
     ) -> Result<TargetResult, error::Spanned<eval::Error>> {
         let target_type = &resolved[self.kind];
-        let tgt = Request_ {
-            request: request.clone(),
-            target_type: self.kind,
-        }
-        .with_ctx(resolved)
-        .to_string();
+        let tgt = request.with_ctx(resolved).to_string();
 
         tracing::error_span!("target", target = tgt);
 
         let before_trace = target_type
             .trace
-            .trace(resolved, &request, &self.workdir)
+            .trace(request, resolved, &scheduler.base_dir)
             .without_span()?;
 
         let cached = scheduler.database.get(request).cloned();
@@ -578,14 +655,14 @@ impl Target {
         // let fast_trace = target_type.trace.fast(resolved, &request).without_span()?;
         let after_trace = target_type
             .trace
-            .trace(resolved, &request, &self.workdir)
+            .trace(&request, resolved, &scheduler.base_dir)
             .without_span()?;
 
         scheduler
             .database
             .add(
                 DatabaseEntry {
-                    target: request.clone(),
+                    request: request.clone(),
                     fast_trace: None, // TODO
                     trace: after_trace.clone(),
                     result: value.clone(),
@@ -621,7 +698,7 @@ pub struct Targets(Vec<Target>);
 #[derive(Default, Hash, Debug, PartialEq, Eq, Clone, Copy)]
 pub struct TargetId(usize);
 
-impl<'a> std::ops::Index<TargetId> for Targets {
+impl std::ops::Index<TargetId> for Targets {
     type Output = Target;
 
     fn index(&self, index: TargetId) -> &Self::Output {
@@ -653,15 +730,18 @@ impl Targets {
 
     pub fn match_(
         &self,
-        resolved: &eval::Resolved,
-        request: &record::Record,
+        resolved: eval::ResolvedRef<'_>,
+        request: &Request,
     ) -> Result<Option<TargetId>, eval::Error> {
         // Filter targets that match the given request
         let candidates = self
             .0
             .iter()
             .enumerate()
-            .filter(|(_ix, target)| target.pattern.matches(request))
+            .filter(|(_ix, target)| {
+                target.module == request.module
+                    && target.pattern.matches(&request.request)
+            })
             .collect::<Vec<_>>();
 
         // Find the most specific target
@@ -707,9 +787,10 @@ struct RequestedTarget {
     seq: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Request {
-    pub target: TargetId,
+    pub module: ModuleId,
+    // Invariant: The record matches the target
     pub request: record::Record,
 }
 
@@ -717,31 +798,24 @@ impl DisplayWith for Request {
     fn fmt(
         &self,
         f: &mut std::fmt::Formatter<'_>,
-        resolved: &eval::Resolved,
+        resolved: eval::ResolvedRef<'_>,
     ) -> std::fmt::Result {
-        let target = &resolved[self.target];
-        let target_type = &resolved[target.kind];
-        target_type.display.fmt(&self.request, resolved, f)
-    }
-}
-
-// For displaying targets
-// It shows them in their punned form (e.g. ./filename instead of
-// file(path="filename"))
-pub struct Request_ {
-    pub target_type: TargetTypeId,
-    pub request: record::Record,
-}
-
-impl<'a> DisplayWith for Request_ {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-        resolved: &eval::Resolved,
-    ) -> std::fmt::Result {
-        resolved[self.target_type]
-            .display
-            .fmt(&self.request, resolved, f)
+        if let Some(target_type) =
+            resolved.target_types.find_by_record(&self.request)
+        {
+            // Request resolves to a target type. Use the target type's display
+            // function to format the request
+            target_type.display.fmt(self, resolved, f)
+        } else {
+            // Request record does not resolve to a target type. Use a
+            // generic formatting method
+            write!(
+                f,
+                "{}:{}",
+                resolved[self.module].with_ctx(resolved),
+                self.request.with_ctx(resolved)
+            )
+        }
     }
 }
 
@@ -754,16 +828,19 @@ pub struct Dependency {
 // single-threaded scheduler
 pub struct Scheduler {
     next: AtomicU32,
-    requested: HashMap<record::Record, RequestedTarget>,
+    requested: HashMap<Request, RequestedTarget>,
     database: Database,
+    // The base dir the entire build runs in (not to be confused with the directory a *module* runs in)
+    pub base_dir: PathBuf,
 }
 
 impl Scheduler {
-    pub fn new(database: Database) -> Self {
+    pub fn new(base_dir: PathBuf, database: Database) -> Self {
         Self {
             next: AtomicU32::new(0),
             requested: Default::default(),
             database,
+            base_dir,
         }
     }
 
@@ -773,8 +850,8 @@ impl Scheduler {
 
     pub fn add(
         &mut self,
-        resolved: &eval::Resolved,
-        request: &record::Record,
+        resolved: eval::ResolvedRef<'_>,
+        request: &Request,
         // Resolved target
     ) -> Result<TargetId, Spanned<eval::Error>> {
         let target =
@@ -785,7 +862,7 @@ impl Scheduler {
                     // No target matches requested resource
                 }
             };
-        let old = self.requested.get(&request);
+        let old = self.requested.get(request);
         match old {
             None => {
                 tracing::trace!("New target {:?} requested", request);
@@ -806,6 +883,9 @@ impl Scheduler {
                     Ok(())
                 }
                 TargetState::Running => {
+                    // This won't work with the parallel scheduler
+                    // since a diamond dependency might schedule the
+                    // target while another path legally requests it
                     tracing::error!("Target request {:?} is circular", request);
                     Err(eval::Error::CircularDependency(
                         request.with_ctx(resolved).to_string(),
@@ -837,8 +917,8 @@ impl Scheduler {
 
     fn find_result(
         &self,
-        resolved: &eval::Resolved,
-        request: &record::Record,
+        resolved: eval::ResolvedRef<'_>,
+        request: &Request,
     ) -> Result<Option<TargetResult>, eval::Error> {
         match &self
             .requested
@@ -856,16 +936,25 @@ impl Scheduler {
 
     fn run_one(
         &mut self,
-        resolved: &eval::Resolved,
+        resolved: eval::ResolvedRef<'_>,
         request: Request,
     ) -> Result<TargetResult, eval::Error> {
-        (*self.requested.get_mut(&request.request).expect("run_one")).state =
+        let target =
+            resolved
+                .targets
+                .match_(resolved, &request)?
+                .ok_or_else(|| {
+                    eval::Error::TargetNotFound(
+                        request.with_ctx(resolved).to_string(),
+                    )
+                })?;
+        (*self.requested.get_mut(&request).expect("run_one")).state =
             TargetState::Running;
-        match resolved[request.target].run(resolved, self, &request.request) {
+        match resolved[target].run(resolved, self, &request) {
             Ok(res) => {
                 (*self
                     .requested
-                    .get_mut(&request.request)
+                    .get_mut(&request)
                     // add() has added the item to requested as well
                     .expect("run_one"))
                 .state = TargetState::Done(res.clone());
@@ -876,7 +965,7 @@ impl Scheduler {
                 blog!(error, target = tgt, "Target failed with: {e}");
                 (*self
                     .requested
-                    .get_mut(&request.request)
+                    .get_mut(&request)
                     // Entry must exist by construction
                     .expect("flush"))
                 .state = TargetState::Error(e);
@@ -888,12 +977,12 @@ impl Scheduler {
     // Demand a single target
     pub fn demand(
         &mut self,
-        resolved: &eval::Resolved,
+        resolved: eval::ResolvedRef<'_>,
         request: Request,
     ) -> Result<TargetResult, eval::Error> {
         tracing::trace!("Resource {:?} demanded", request);
         // Check if value is already present
-        match self.find_result(resolved, &request.request)? {
+        match self.find_result(resolved, &request)? {
             // Target already finished, return result
             Some(v) => Ok(v),
             // Target still outstanding, run
@@ -901,7 +990,7 @@ impl Scheduler {
         }
     }
 
-    fn take(&mut self) -> HashMap<record::Record, RequestedTarget> {
+    fn take(&mut self) -> HashMap<Request, RequestedTarget> {
         self.next.store(0, std::sync::atomic::Ordering::Relaxed);
         std::mem::take(&mut self.requested)
     }
@@ -910,22 +999,17 @@ impl Scheduler {
     // Errors when the targets could not be added
     pub fn demand_all(
         &mut self,
-        resolved: &eval::Resolved,
-        recs: &[record::Record],
+        resolved: eval::ResolvedRef<'_>,
+        requests: &[Request],
     ) -> Result<Vec<TargetReport>, Spanned<eval::Error>> {
-        let mut requests = Vec::with_capacity(recs.len());
-        for r in recs.iter() {
+        for r in requests {
             let target = self.add(resolved, r)?;
-            requests.push(Request {
-                target,
-                request: r.clone(),
-            });
         }
 
         let mut res = Vec::with_capacity(requests.len());
         for r in requests.into_iter() {
             let _ = self
-                .demand(resolved, r)
+                .demand(resolved, r.clone())
                 .without_span()
                 .map(|v| res.push(v.value));
         }
@@ -935,12 +1019,7 @@ impl Scheduler {
             .into_iter()
             .map(|(request, st)| TargetReport {
                 seq: st.seq,
-                request: Request_ {
-                    request,
-                    target_type: st.kind,
-                }
-                .with_ctx(resolved)
-                .to_string(),
+                request: request.with_ctx(resolved).to_string(),
                 result: match st.state {
                     TargetState::Error(error) => ReportResult::Error { error },
 
