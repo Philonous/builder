@@ -1,0 +1,17 @@
+---
+source: src/parser/lexer.rs
+expression: tokens
+input_file: src/parser/test/lexer/task-target.in
+---
+[
+    (
+        Ok(
+            Normal(
+                ColonIdent(
+                    "my-task",
+                ),
+            ),
+        ),
+        0..8,
+    ),
+]

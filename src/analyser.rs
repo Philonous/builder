@@ -156,12 +156,17 @@ impl<'a> parser::Lit<'a> {
     }
 }
 
+pub struct Builtins {
+    target_types: BuiltinTargetTypes,
+}
+
 pub struct Ctx<'fs> {
     pub interner: &'fs mut Rodeo,
     pub functions: &'fs Functions,
     pub records: &'fs RecordSchemas,
     pub target_types: &'fs TargetTypes,
     pub module: ModuleId,
+    pub builtins: Builtins,
     // todo: constants
 }
 
@@ -273,6 +278,30 @@ impl<'a> parser::Expr<'a> {
                     .with_span(span)
                     .add_errors(&mut errors)
                     .unwrap_or_default()
+            }
+            parser::ExprKind::FileIdent(file_ident) => {
+                // Desugar to record
+                let schema = ctx.builtins.target_types.file.request_schema;
+                // Target type file has one field: path (string)
+                let fields = vec![eval::Expr {
+                    kind: eval::ExprKind::Lit(eval::Value::String(
+                        file_ident.0.inner.to_owned(),
+                    )),
+                    span: Some(file_ident.0.span.into()),
+                }];
+                eval::ExprKind::Record { schema, fields }
+            }
+            parser::ExprKind::TaskIdent(task_ident) => {
+                // Desugar to record
+                let schema = ctx.builtins.target_types.task.request_schema;
+                // Target type task has one field: name (string)
+                let fields = vec![eval::Expr {
+                    kind: eval::ExprKind::Lit(eval::Value::String(
+                        task_ident.0.inner.to_owned(),
+                    )),
+                    span: Some(task_ident.0.span.into()),
+                }];
+                eval::ExprKind::Record { schema, fields }
             }
             parser::ExprKind::Command(parser::Command { executable, args }) => {
                 eval::ExprKind::Command {
@@ -633,7 +662,7 @@ impl<'a> parser::Decl<'a> {
 
         let target = match self {
             parser::Decl::Target { args, ident, block } => match ident {
-                parser::TargetIdent::AtTarget(s) => {
+                parser::TargetIdent::File(s) => {
                     let name = Ident(ctx.interner.get_or_intern_static("file"));
                     let (schema, _) =
                         ctx.records.find(name).expect("file record schema");
@@ -643,7 +672,32 @@ impl<'a> parser::Decl<'a> {
                         .expect("file target type");
                     let patterns = vec![
                         (parameters::Pattern::Literal(eval::Value::String(
-                            String::from(s),
+                            String::from(s.0.inner),
+                        ))),
+                    ];
+
+                    parser::Decl::resolve_target(
+                        ctx,
+                        target_type,
+                        type_id,
+                        outer,
+                        parameters::Patterns(patterns),
+                        block,
+                    )
+                    .add_errors(&mut errors)
+                    .unwrap_or_default()
+                }
+                parser::TargetIdent::Task(s) => {
+                    let name = Ident(ctx.interner.get_or_intern_static("task"));
+                    let (schema, _) =
+                        ctx.records.find(name).expect("task record schema");
+                    let (type_id, target_type) = ctx
+                        .target_types
+                        .find_by_request(schema)
+                        .expect("task target type");
+                    let patterns = vec![
+                        (parameters::Pattern::Literal(eval::Value::String(
+                            String::from(s.0.inner),
                         ))),
                     ];
 
@@ -720,14 +774,22 @@ impl<'a> parser::Decl<'a> {
     }
 }
 
+#[derive(Clone)]
+struct BuiltinTargetTypes {
+    file: TargetType,
+    task: TargetType,
+}
+
 fn register_builtin_target_types(
     interner: &mut Rodeo,
     records: &mut RecordSchemas,
     target_types: &mut TargetTypes,
-) -> Result<(), Error> {
-    target::register_target_type_file(interner, records, target_types)?;
-    target::register_target_type_task(interner, records, target_types)?;
-    Ok(())
+) -> Result<BuiltinTargetTypes, Error> {
+    let file =
+        target::register_target_type_file(interner, records, target_types)?;
+    let task =
+        target::register_target_type_task(interner, records, target_types)?;
+    Ok(BuiltinTargetTypes { file, task })
 }
 
 impl<'a> parser::Ast<'a> {
@@ -742,7 +804,7 @@ impl<'a> parser::Ast<'a> {
         let mut target_types = Default::default();
         let mut records = Default::default();
 
-        register_builtin_target_types(
+        let builtin_target_types = register_builtin_target_types(
             &mut interner,
             &mut records,
             &mut target_types,
@@ -758,6 +820,9 @@ impl<'a> parser::Ast<'a> {
             records: &records,
             target_types: &target_types,
             module,
+            builtins: Builtins {
+                target_types: builtin_target_types,
+            },
         };
         for decl in self.decls {
             let t = decl

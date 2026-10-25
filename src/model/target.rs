@@ -53,6 +53,7 @@ impl std::fmt::Display for Trace {
 /// the trace stays the same, the target hasn't changed
 ///
 /// Fast trace function
+#[derive(Clone, Copy)]
 pub enum TraceFun {
     Builtin {
         // Return of None means resource does not exist
@@ -70,6 +71,7 @@ pub enum TraceFun {
 }
 
 // Function for displaying the target (e.g. special syntax for files or tasks)
+#[derive(Clone, Copy)]
 pub enum DisplFun {
     Builtin {
         fmt: fn(
@@ -194,8 +196,9 @@ impl std::ops::Index<ModuleId> for Modules {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct TargetType {
+    pub id: TargetTypeId,
     // Schema that defines how we refer to targets of this type
     pub request_schema: RecordId,
     pub name_is: usize,
@@ -270,20 +273,21 @@ impl TargetTypes {
         name_is: usize,
         trace: TraceFun,
         display: DisplFun,
-    ) -> Result<TargetTypeId, Error> {
+    ) -> Result<TargetType, Error> {
         let req_id = records
             .register(interner, request_name, request_fields)
             .map_err(|record::Error::DuplicateRecordSchema(s)| {
             Error::DuplicateTargetType(s)
         })?;
-
-        self.0.push(TargetType {
+        let target_type = TargetType {
+            id: TargetTypeId(self.0.len()),
             request_schema: req_id,
             name_is,
             trace,
             display,
-        });
-        return Ok(TargetTypeId(self.0.len() - 1));
+        };
+        self.0.push(target_type);
+        return Ok(target_type);
     }
 
     pub fn find_by_request(
@@ -373,7 +377,7 @@ pub fn register_target_type_file(
     interner: &mut Rodeo,
     records: &mut RecordSchemas,
     target_types: &mut TargetTypes,
-) -> Result<TargetTypeId, Error> {
+) -> Result<TargetType, Error> {
     let request_parameters = Parameters::builder(interner)
         .add_static("path", None)
         .build();
@@ -405,7 +409,7 @@ pub fn register_target_type_task(
     interner: &mut Rodeo,
     records: &mut RecordSchemas,
     target_types: &mut TargetTypes,
-) -> Result<TargetTypeId, Error> {
+) -> Result<TargetType, Error> {
     let name = interner.get_or_intern("name");
     let parameters = Parameters(vec![(
         Ident(name),

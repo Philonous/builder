@@ -111,6 +111,8 @@ pub enum ExprKind<'a> {
     Lit(Lit<'a>),
     String(StringExpr<'a>),
     Ident(Ident<'a>),
+    FileIdent(FileIdent<'a>),
+    TaskIdent(TaskIdent<'a>),
     Command(Command<'a>),
     FunApp(Ident<'a>, Spanned<Arguments<'a>>),
     Need(NeedExpr<'a>),
@@ -378,6 +380,8 @@ impl<'tok> Expr<'tok> {
                 .or(NeedExpr::parse(expr.clone()).map(ExprKind::Need))
                 .or(Lit::parse().map(ExprKind::Lit))
                 .or(Ident::parse().map(ExprKind::Ident))
+                .or(FileIdent::parse().map(ExprKind::FileIdent))
+                .or(TaskIdent::parse().map(ExprKind::TaskIdent))
                 // This has to come after Lit because they overlap
                 .or(just(normal!(StringStart))
                     .ignore_then(StringExpr::parse().map(ExprKind::String)))
@@ -403,13 +407,57 @@ impl<'tok> Statement<'tok> {
     }
 }
 
+pub struct ModuleIdent<'a>(Spanned<Vec<Ident<'a>>>);
+
+impl<'tok> ModuleIdent<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        select! { normal!(ModuleIdent(path)) = tok
+        => Self(
+            Spanned { span: tok.span()
+                    , inner: path.0.into_iter().map(Ident).collect()
+                    }
+            )}
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct FileIdent<'a>(pub Spanned<&'a str>);
+
+impl<'tok> FileIdent<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        select! { normal!(FileIdent(s)) = tok => Self(Spanned{ span: tok.span(), inner: s}) }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct TaskIdent<'a>(pub Spanned<&'a str>);
+
+impl<'tok> TaskIdent<'tok> {
+    fn parse<'src: 'tok, I>(
+    ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
+    where
+        I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
+    {
+        select! { normal!(ColonIdent(s)) = tok => Self(Spanned{ span: tok.span(), inner: s}) }
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum TargetIdent<'a> {
     Normal {
         name: Spanned<Ident<'a>>, // E.g. target file("dist/exe")
         pattern: Patterns<'a>,
     },
-    AtTarget(&'a str), // E.g. @dist/exe
+    File(FileIdent<'a>), // E.g. ./dist/exe
+    Task(TaskIdent<'a>), // E.g. :do-something
 }
 
 impl<'tok> TargetIdent<'tok> {
@@ -418,12 +466,13 @@ impl<'tok> TargetIdent<'tok> {
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        let at_decl = select! { normal!(AtString(s)) => Self::AtTarget(s) };
+        let file_decl = FileIdent::parse().map(Self::File);
+        let task_decl = TaskIdent::parse().map(Self::Task);
         let normal_target_decl = Ident::parse()
             .spanned()
             .then(Patterns::parse())
             .map(|(name, pattern)| Self::Normal { name, pattern });
-        at_decl.or(normal_target_decl)
+        file_decl.or(task_decl).or(normal_target_decl)
     }
 }
 

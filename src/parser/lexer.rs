@@ -12,15 +12,40 @@ pub enum LexError {
     Other,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModulePath<'a>(pub Vec<&'a str>);
+
+impl<'a> ModulePath<'a> {
+    fn from_str(s: &'a str) -> Self {
+        let body = &s[..s.len() - 1];
+        Self(body.split(":").collect())
+    }
+}
+
+impl fmt::Display for ModulePath<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for m in self.0.iter() {
+            write!(f, "{m}:")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Logos, PartialEq, Clone)]
 #[logos(error(LexError))]
+#[logos(subpattern ident = r#"[a-zA-Z][a-zA-Z0-9_-]*"#)]
 #[logos(skip r"[ \t\r\n\f]+")]
 pub enum NormalToken<'a> {
-    #[regex(r"[a-zA-Z][a-zA-Z/_-]*", |lex| lex.slice())]
+    #[regex(r"((?&ident):)+", |lex| ModulePath::from_str(lex.slice()))]
+    ModuleIdent(ModulePath<'a>),
+
+    #[regex(r"(?&ident)", |lex| lex.slice())]
     Ident(&'a str),
 
-    #[regex(r"@[.-/a-zA-Z]+", |lex| &lex.slice()[1..])]
-    AtString(&'a str),
+    #[regex(r#"\./[.\-_/a-zA-Z0-9]+"#, |lex| &lex.slice()[2..])]
+    FileIdent(&'a str),
+    #[regex(r#":[.\-_/a-zA-Z0-9]+"#, |lex| &lex.slice()[1..])]
+    ColonIdent(&'a str),
 
     #[token("(")]
     ParenOpen,
@@ -67,8 +92,10 @@ pub enum NormalToken<'a> {
 impl fmt::Display for NormalToken<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Self::ModuleIdent(mods) => write!(f, "{mods}"),
             Self::Ident(s) => write!(f, "{s}"),
-            Self::AtString(s) => write!(f, "@{s}"),
+            Self::FileIdent(file) => write!(f, "./{file}"),
+            Self::ColonIdent(file) => write!(f, ":{file}"),
             Self::ParenOpen => write!(f, "open parenthesis"),
             Self::ParenClose => write!(f, "closing parenthesis"),
             Self::BraceOpen => write!(f, "open brace"),
@@ -94,7 +121,7 @@ pub enum CommandToken<'a> {
     #[regex(r#"[^ `\"$\t\r\n\f]+"#)]
     UnquotedString(&'a str),
 
-    #[regex(r#"\{[[:space:]]*[a-zA-Z][a-zA-Z/_-]+[[:space:]]*\}"#, |lex| splice_name(lex.slice()))]
+    #[regex(r#"\{[[:space:]]*[a-zA-Z][a-zA-Z0-9_-]+[[:space:]]*\}"#, |lex| splice_name(lex.slice()))]
     SpliceIdent(&'a str),
 
     #[regex(r#"""#)]
@@ -123,7 +150,7 @@ fn splice_name(s: &str) -> Option<&str> {
     // Expect sigil followed by identifier wrapped in braces with optional spaces
     // e.g. ${ my_variable } or #{testing-testing}
     let re = regex::Regex::new(
-        r#"\{[[:space:]]*([a-zA-Z_][a-zA-Z/-_]*)[[:space:]]*\}"#,
+        r#"\{[[:space:]]*([a-zA-Z_][a-zA-Z0-9-_]*)[[:space:]]*\}"#,
     )
     .expect("parsing regex");
     Some(re.captures(s)?.get(1)?.as_str())

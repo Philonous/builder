@@ -1,0 +1,17 @@
+---
+source: src/parser/lexer.rs
+expression: tokens
+input_file: src/parser/test/lexer/file-target.in
+---
+[
+    (
+        Ok(
+            Normal(
+                FileIdent(
+                    "module/test-dep",
+                ),
+            ),
+        ),
+        0..17,
+    ),
+]

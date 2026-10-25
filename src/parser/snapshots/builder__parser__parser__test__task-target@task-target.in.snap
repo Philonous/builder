@@ -1,0 +1,28 @@
+---
+source: src/parser/parser.rs
+expression: "super::parse_str(&input)"
+input_file: src/parser/test/parser/task-target.in
+---
+Ok(
+    Ast {
+        decls: [
+            Target {
+                args: LitArguments(
+                    [],
+                ),
+                ident: Task(
+                    TaskIdent(
+                        Spanned {
+                            inner: "1",
+                            span: 7..9,
+                        },
+                    ),
+                ),
+                block: Block {
+                    statements: [],
+                    returns_last_value: true,
+                },
+            },
+        ],
+    },
+)

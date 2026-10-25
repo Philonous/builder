@@ -1,0 +1,51 @@
+---
+source: src/parser/lexer.rs
+expression: tokens
+input_file: src/parser/test/lexer/bool.in
+---
+[
+    (
+        Ok(
+            Normal(
+                Let,
+            ),
+        ),
+        0..3,
+    ),
+    (
+        Ok(
+            Normal(
+                Ident(
+                    "bool",
+                ),
+            ),
+        ),
+        4..8,
+    ),
+    (
+        Ok(
+            Normal(
+                Equals,
+            ),
+        ),
+        9..10,
+    ),
+    (
+        Ok(
+            Normal(
+                Bool(
+                    true,
+                ),
+            ),
+        ),
+        11..15,
+    ),
+    (
+        Ok(
+            Normal(
+                Semicolon,
+            ),
+        ),
+        15..16,
+    ),
+]

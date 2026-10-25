@@ -1,0 +1,276 @@
+---
+source: src/parser/parser.rs
+expression: "super::parse_str(&input)"
+input_file: src/parser/test/parser/example1.in
+---
+Ok(
+    Ast {
+        decls: [
+            Target {
+                args: LitArguments(
+                    [],
+                ),
+                ident: File(
+                    FileIdent(
+                        Spanned {
+                            inner: "dist/exe",
+                            span: 7..17,
+                        },
+                    ),
+                ),
+                block: Block {
+                    statements: [
+                        Let(
+                            Spanned {
+                                inner: Ident(
+                                    "exe",
+                                ),
+                                span: 58..61,
+                            },
+                            Expr(
+                                Spanned {
+                                    inner: Lit(
+                                        String(
+                                            Quoted {
+                                                delim: '"',
+                                                raw: "target/\\\"build\\\"/exe",
+                                            },
+                                        ),
+                                    ),
+                                    span: 64..86,
+                                },
+                            ),
+                        ),
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Need(
+                                        NeedExpr(
+                                            Expr(
+                                                Spanned {
+                                                    inner: FileIdent(
+                                                        FileIdent(
+                                                            Spanned {
+                                                                inner: "Cargo.toml",
+                                                                span: 134..146,
+                                                            },
+                                                        ),
+                                                    ),
+                                                    span: 134..146,
+                                                },
+                                            ),
+                                        ),
+                                    ),
+                                    span: 129..147,
+                                },
+                            ),
+                        ),
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Need(
+                                        NeedExpr(
+                                            Expr(
+                                                Spanned {
+                                                    inner: FileIdent(
+                                                        FileIdent(
+                                                            Spanned {
+                                                                inner: "Cargo.lock",
+                                                                span: 156..168,
+                                                            },
+                                                        ),
+                                                    ),
+                                                    span: 156..168,
+                                                },
+                                            ),
+                                        ),
+                                    ),
+                                    span: 151..169,
+                                },
+                            ),
+                        ),
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Need(
+                                        NeedExpr(
+                                            Expr(
+                                                Spanned {
+                                                    inner: FunApp(
+                                                        Ident(
+                                                            "glob",
+                                                        ),
+                                                        Spanned {
+                                                            inner: Arguments(
+                                                                [
+                                                                    Spanned {
+                                                                        inner: Bare(
+                                                                            Expr(
+                                                                                Spanned {
+                                                                                    inner: Lit(
+                                                                                        String(
+                                                                                            Quoted {
+                                                                                                delim: '"',
+                                                                                                raw: "src/**/*",
+                                                                                            },
+                                                                                        ),
+                                                                                    ),
+                                                                                    span: 225..235,
+                                                                                },
+                                                                            ),
+                                                                        ),
+                                                                        span: 225..235,
+                                                                    },
+                                                                ],
+                                                            ),
+                                                            span: 224..236,
+                                                        },
+                                                    ),
+                                                    span: 220..236,
+                                                },
+                                            ),
+                                        ),
+                                    ),
+                                    span: 215..237,
+                                },
+                            ),
+                        ),
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Command(
+                                        Command {
+                                            executable: BareString(
+                                                Spanned {
+                                                    inner: "cargo",
+                                                    span: 304..309,
+                                                },
+                                            ),
+                                            args: [
+                                                BareString(
+                                                    Spanned {
+                                                        inner: "build",
+                                                        span: 310..315,
+                                                    },
+                                                ),
+                                            ],
+                                        },
+                                    ),
+                                    span: 303..316,
+                                },
+                            ),
+                        ),
+                    ],
+                    returns_last_value: true,
+                },
+            },
+            Target {
+                args: LitArguments(
+                    [],
+                ),
+                ident: Normal {
+                    name: Spanned {
+                        inner: Ident(
+                            "docker",
+                        ),
+                        span: 328..334,
+                    },
+                    pattern: Patterns(
+                        [
+                            Spanned {
+                                inner: Named {
+                                    name: Ident(
+                                        "image",
+                                    ),
+                                    pattern: Lit(
+                                        String(
+                                            Quoted {
+                                                delim: '"',
+                                                raw: "app",
+                                            },
+                                        ),
+                                    ),
+                                },
+                                span: 335..348,
+                            },
+                        ],
+                    ),
+                },
+                block: Block {
+                    statements: [
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Need(
+                                        NeedExpr(
+                                            Expr(
+                                                Spanned {
+                                                    inner: FileIdent(
+                                                        FileIdent(
+                                                            Spanned {
+                                                                inner: "dist/exe",
+                                                                span: 359..369,
+                                                            },
+                                                        ),
+                                                    ),
+                                                    span: 359..369,
+                                                },
+                                            ),
+                                        ),
+                                    ),
+                                    span: 354..370,
+                                },
+                            ),
+                        ),
+                        Expr(
+                            Expr(
+                                Spanned {
+                                    inner: Command(
+                                        Command {
+                                            executable: BareString(
+                                                Spanned {
+                                                    inner: "docker",
+                                                    span: 446..452,
+                                                },
+                                            ),
+                                            args: [
+                                                BareString(
+                                                    Spanned {
+                                                        inner: "build",
+                                                        span: 453..458,
+                                                    },
+                                                ),
+                                                BareString(
+                                                    Spanned {
+                                                        inner: "-t",
+                                                        span: 459..461,
+                                                    },
+                                                ),
+                                                String(
+                                                    StringExpr(
+                                                        [
+                                                            Splice(
+                                                                Spanned {
+                                                                    inner: Ident(
+                                                                        "target",
+                                                                    ),
+                                                                    span: 463..471,
+                                                                },
+                                                            ),
+                                                        ],
+                                                    ),
+                                                ),
+                                            ],
+                                        },
+                                    ),
+                                    span: 445..473,
+                                },
+                            ),
+                        ),
+                    ],
+                    returns_last_value: true,
+                },
+            },
+        ],
+    },
+)
