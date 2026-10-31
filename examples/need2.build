@@ -1,10 +1,10 @@
-target file(path) {
+rule file(path) {
   `bash -c "echo hello > hello"`;
   print("Path: {path}");
   "hello"
 }
 
-target task("1") {
+rule task("1") {
   let hello = need(file(path="test"));
   let bla = need(file(path="bla"));
   # Check that the value is deferred

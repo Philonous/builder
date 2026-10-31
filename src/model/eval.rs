@@ -12,10 +12,10 @@ use super::parameters;
 pub use super::value::{Type, Value};
 use crate::error;
 use crate::error::WithSpan;
-use crate::model::target::Request;
-use crate::model::target::{
-    self, Module, ModuleId, Modules, Target, TargetId, TargetType,
-    TargetTypeId, TargetTypes, Targets,
+use crate::model::rule::Target;
+use crate::model::rule::{
+    self, Module, ModuleId, Modules, Rule, RuleId, TargetType, TargetTypeId,
+    TargetTypes, Rules,
 };
 use crate::model::value::display::{DisplayCtx, WithDisplayCtxExt};
 use crate::model::value::record;
@@ -43,13 +43,13 @@ pub enum Error {
     CircularDependency(String),
     #[error("Dependency {0} encountered an error")]
     DependencyError(String),
-    #[error("Target {0} matches multiple patterns")]
+    #[error("Target {0} matches multiple rules")]
     AmbiguousTarget(String),
-    #[error("Request {0} matches no target")]
-    TargetNotFound(String),
+    #[error("Target {0} matches no rule")]
+    RuleNotFound(String),
     #[error("Assertion failed: {0}")]
     AssertionFailed(String),
-    #[error("Error while handling target database")]
+    #[error("Error while handling build database")]
     DatabaseError,
 }
 
@@ -176,8 +176,8 @@ impl<'a> From<Value> for Expr {
 #[derive(Debug, Clone)]
 pub enum Deferrable {
     Deferred {
-        target: target::TargetId,
-        request: Request,
+        rule: rule::RuleId,
+        target: Target,
     },
     Immediate(Value),
 }
@@ -191,12 +191,12 @@ impl From<Value> for Deferrable {
 impl Deferrable {
     pub fn force(&self, ctx: &mut EvalContext) -> Result<Value, Error> {
         Ok(match self {
-            Deferrable::Deferred { target, request } => {
+            Deferrable::Deferred { rule, target } => {
                 // Forcing a value is a layer boundary - later
                 // dependencies can depend on this value, so they have
                 // to be in a new layer
                 ctx.dependencies.new_layer();
-                ctx.scheduler.demand(ctx.resolved, request.clone())?.value
+                ctx.scheduler.demand(ctx.resolved, target.clone())?.value
             }
             Deferrable::Immediate(value) => value.clone(),
         })
@@ -214,7 +214,7 @@ impl Expr {
                 ctx.read_var(var).with_opt_span(self.span)?.into()
             }
             ExprKind::Command { executable, args } => {
-                // Commands can see effects of targets, so we need to flush
+                // Commands can see effects of rules, so we need to flush
                 ctx.flush_dependencies().without_span()?;
                 let executable = executable
                     .eval(ctx)?
@@ -263,21 +263,21 @@ impl Expr {
             ExprKind::Need { request } => {
                 let value =
                     request.eval(ctx)?.force(ctx).with_opt_span(self.span)?;
-                let request = Request {
-                    request: value
+                let target = Target {
+                    record: value
                         .expect_record(ctx.resolved)
                         .without_span()?
                         .clone(),
                     module: ctx.module,
                 };
                 // register dependency
-                ctx.dependencies.add(request.clone());
+                ctx.dependencies.add(target.clone());
 
-                let target = ctx.scheduler.add(ctx.resolved, &request)?;
-                ctx.outstanding.push(request.clone());
+                let rule = ctx.scheduler.add(ctx.resolved, &target)?;
+                ctx.outstanding.push(target.clone());
                 Deferrable::Deferred {
-                    target,
-                    request: request.clone(),
+                    rule,
+                    target: target.clone(),
                 }
             }
             ExprKind::Record { schema, fields } => {
@@ -348,7 +348,7 @@ pub enum SlotState {
     // variables, so seeing it is a bug
     Uninitialised,
     /// Needs to be filled in by flushing outstanding deferred
-    /// operations, e.g. registered targets
+    /// operations, e.g. needed targets
     Value(Deferrable),
 }
 
@@ -395,7 +395,7 @@ pub struct Resolved<R = RodeoResolver> {
     pub resolver: R,
     pub records: RecordSchemas,
     pub target_types: TargetTypes,
-    pub targets: Targets,
+    pub rules: Rules,
     pub modules: Modules,
 }
 
@@ -439,11 +439,11 @@ impl<'a, T> std::ops::Index<TargetTypeId> for Resolved<T> {
     }
 }
 
-impl<'a, T> std::ops::Index<TargetId> for Resolved<T> {
-    type Output = Target;
+impl<'a, T> std::ops::Index<RuleId> for Resolved<T> {
+    type Output = Rule;
 
-    fn index(&self, index: TargetId) -> &Self::Output {
-        &self.targets[index]
+    fn index(&self, index: RuleId) -> &Self::Output {
+        &self.rules[index]
     }
 }
 
@@ -462,7 +462,7 @@ pub struct ResolvedRef<'a> {
     pub resolver: &'a dyn lasso::Resolver,
     pub records: &'a RecordSchemas,
     pub target_types: &'a TargetTypes,
-    pub targets: &'a Targets,
+    pub rules: &'a Rules,
     pub modules: &'a Modules,
 }
 
@@ -473,7 +473,7 @@ impl<'a, R: lasso::Resolver> From<&'a Resolved<R>> for ResolvedRef<'a> {
             resolver: &resolved.resolver,
             records: &resolved.records,
             target_types: &resolved.target_types,
-            targets: &resolved.targets,
+            rules: &resolved.rules,
             modules: &resolved.modules,
         }
     }
@@ -517,11 +517,11 @@ impl<'a> std::ops::Index<TargetTypeId> for ResolvedRef<'a> {
     }
 }
 
-impl<'a> std::ops::Index<TargetId> for ResolvedRef<'a> {
-    type Output = Target;
+impl<'a> std::ops::Index<RuleId> for ResolvedRef<'a> {
+    type Output = Rule;
 
-    fn index(&self, index: TargetId) -> &Self::Output {
-        &self.targets[index]
+    fn index(&self, index: RuleId) -> &Self::Output {
+        &self.rules[index]
     }
 }
 
@@ -544,11 +544,11 @@ pub struct EvalContext<'a> {
     // Stacked list
     pub variables: &'a mut Vec<Slots>,
     pub resolved: ResolvedRef<'a>,
-    pub scheduler: &'a mut target::Scheduler,
-    pub dependencies: &'a mut target::Dependencies,
-    pub outstanding: &'a mut Vec<target::Request>,
+    pub scheduler: &'a mut rule::Scheduler,
+    pub dependencies: &'a mut rule::Dependencies,
+    pub outstanding: &'a mut Vec<rule::Target>,
     // Current module
-    pub module: target::ModuleId,
+    pub module: rule::ModuleId,
 }
 
 impl<'a> Into<DisplayCtx<'a>> for &'a EvalContext<'a> {
@@ -650,7 +650,7 @@ impl<'a> EvalContext<'a> {
                 Err(Error::UninitVariable(name.to_owned()))
             }
             // This intentionally overwrites the deferred state. The
-            // target will get forced anyway
+            // deferred target will get forced anyway
             _ => {
                 slot.value = SlotState::Value(val);
                 Ok(())
@@ -707,10 +707,10 @@ pub fn builtin_fun_print_debug(interner: &mut Rodeo) -> Fun {
             [v] => {
                 // We *dont* force values here so we can see "under the hood"
                 match v {
-                    Deferrable::Deferred { request, .. } => {
+                    Deferrable::Deferred { target, .. } => {
                         println!(
                             "<deferred: {}>",
-                            request.with_ctx(ctx.resolved)
+                            target.with_ctx(ctx.resolved)
                         );
                     }
                     Deferrable::Immediate(v) => {

@@ -1,4 +1,4 @@
-target ./dist/exe {
+rule ./dist/exe {
 
   # Declare variable for reuse
   let exe = "target/\"build\"/exe";
@@ -15,7 +15,7 @@ target ./dist/exe {
 
 }
 
-target docker(image = "app") {
+rule docker(image = "app") {
   need(./dist/exe);
 
   # Tag is inherited from resource, ${} is variable use/interpolation

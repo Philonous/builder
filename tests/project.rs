@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
 use builder;
-use builder::model::target::{ReportResult, TargetReport};
+use builder::model::rule::{ReportResult, TargetReport};
 use tracing_subscriber::EnvFilter;
 
 static TRACING: LazyLock<()> = LazyLock::new(|| {
@@ -29,13 +29,13 @@ pub struct Report(Vec<TargetReport>);
 
 impl Report {
     pub fn find(&self, name: &str) -> &TargetReport {
-        match self.0.iter().find(|tr| &tr.request == name) {
+        match self.0.iter().find(|tr| &tr.target == name) {
             Some(report) => report,
             None => {
                 eprintln!("No target report for {name} found");
                 eprintln!("Available reports:");
                 for r in self.0.iter() {
-                    eprintln!("  {}", r.request);
+                    eprintln!("  {}", r.target);
                 }
                 panic!("")
             }

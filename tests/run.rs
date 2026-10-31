@@ -18,7 +18,7 @@ fn simple_run() {
     // Create temporary directory
     let p = Project::new(
         r#"
-target file("1") {
+rule file("1") {
   write_file("1", "write_file");
 }
     "#,
@@ -36,7 +36,7 @@ fn skip_on_unchanged() {
     // Create temporary directory
     let p = Project::new(
         r#"
-target file("1") {
+rule file("1") {
   write_file("1", "test");
 }
     "#,
@@ -55,7 +55,7 @@ fn rerun_on_change() {
     // Create temporary directory
     let p = Project::new(
         r#"
-target file("1") {
+rule file("1") {
   write_file("1", "test");
   write_file("sentinel", append = true, val = "." );
 }
@@ -68,13 +68,13 @@ target file("1") {
     // Modify file to trigger rebuild
     p.write("1", "toodeloo");
 
-    // Target should run again
+    // Target should be rebuilt
     let r2 = p.run("1");
     r2.assert_ok();
 
     assert_eq!(r2.status("./1"), Status::Ok);
     // Check that the file has been written to twice
-    // - checks that the target has actually been run
+    // - checks that the target has actually been rebuilt
     assert_eq!(p.read("sentinel"), "..");
 }
 
@@ -83,7 +83,7 @@ fn rerun_on_delete() {
     // Create temporary directory
     let p = Project::new(
         r#"
-target file("1") {
+rule file("1") {
   write_file("1", "test");
   write_file("sentinel", append = true, val = "." );
 }
@@ -96,54 +96,54 @@ target file("1") {
     // Modify file to trigger rebuild
     p.rm("1");
 
-    // Target should run again
+    // Target should be rebuilt
     let r2 = p.run("1");
     r2.assert_ok();
 
     assert_eq!(r2.status("./1"), Status::Ok);
     // Check that the file has been written to twice
-    // - checks that the target has actually been run
+    // - checks that the target has actually been rebuilt
     assert_eq!(p.read("sentinel"), "..");
 }
 
-// #[test]
-// fn rerun_on_dep_changed() {
-//     // Create temporary directory
-//     let p = Project::new(
-//         r#"
-// target file("1") {
-//   need(file("dep"));
-//   write_file("1", "test");
-// }
-//     "#,
-//     );
+#[test]
+fn rerun_on_dep_changed() {
+    // Create temporary directory
+    let p = Project::new(
+        r#"
+rule ./1 {
+  need(./dep);
+  write_file("1", "test");
+}
+    "#,
+    );
 
-//     p.write("dep", "v1");
+    p.write("dep", "v1");
 
-//     let r1 = p.run("1");
-//     r1.assert_ok();
+    let r1 = p.run("1");
+    r1.assert_ok();
 
-//     // Modify file to trigger rebuild
-//     p.write("dep", "toodeloo");
+    // Modify file to trigger rebuild
+    p.write("dep", "toodeloo");
 
-//     // Target should run again
-//     let r2 = p.run("1");
-//     r2.assert_ok();
+    // Target should be rebuilt
+    let r2 = p.run("1");
+    r2.assert_ok();
 
-//     assert_eq!(r2.status("./1"), Status::Ok);
-// }
+    assert_eq!(r2.status("./1"), Status::Ok);
+}
 
 // #[test]
 // fn transitive_dependency() {
 //     // Create temporary directory
 //     let p = Project::new(
 //         r#"
-// target file("1") {
+// rule file("1") {
 //   need(file("dep"));
 //   `cp dep 1`
 // }
 
-// target file("2") {
+// rule file("2") {
 //   need(file("1"));
 //   `cp 1 2`
 // }
@@ -158,7 +158,7 @@ target file("1") {
 //     // Modify file to trigger rebuild
 //     p.write("dep", "toodeloo");
 
-//     // Target should run again
+//     // Target should be rebuilt
 //     let r2 = p.run("1");
 //     r2.assert_ok();
 

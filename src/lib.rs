@@ -18,7 +18,7 @@ pub mod process;
 pub mod store;
 
 use clap::{Parser, Subcommand};
-use model::target::database::Database;
+use model::rule::database::Database;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -26,7 +26,7 @@ use crate::{
     error::Errors,
     model::{
         eval::{self, Resolved, ResolvedRef},
-        target::{ModuleId, Modules},
+        rule::{ModuleId, Modules},
         value::WithDisplayCtxExt,
     },
 };
@@ -70,7 +70,7 @@ enum Command {
         #[arg(required = true)]
         request: String,
     },
-    /// Run one or more items (the default command).
+    /// List the targets that can be run
     Targets,
 }
 
@@ -146,7 +146,7 @@ pub fn run(
     cwd: &Path,
     src: &str,
     request: impl AsRef<str>,
-) -> Result<Vec<model::target::TargetReport>, error::Spanned<eval::Error>> {
+) -> Result<Vec<model::rule::TargetReport>, error::Spanned<eval::Error>> {
     let request = request.as_ref();
     let ast = parse(&src);
     let mut resolved = resolve(&src, ast, Default::default());
@@ -159,26 +159,26 @@ pub fn run(
         resolver: resolved.resolver.into_resolver(),
         records: resolved.records,
         target_types: resolved.target_types,
-        targets: resolved.targets,
+        rules: resolved.rules,
         modules,
     };
 
-    let target = match resolved.targets.find_by_string(&request) {
+    let rule = match resolved.rules.find_by_target(&request) {
         Ok(t) => t,
         Err(e) => {
             blog!(error, "{}", e);
             std::process::exit(1)
         }
     };
-    let target_type = &resolved[target.kind];
+    let target_type = &resolved[rule.kind];
     let resolved_ref = ResolvedRef::from(&resolved);
-    let request = target_type
-        .request_from_name(resolved_ref, &request)
-        .expect("construct request from name");
+    let target = target_type
+        .target_from_name(resolved_ref, &request)
+        .expect("construct target from name");
 
-    let mut scheduler = model::target::Scheduler::new(cwd.to_owned(), database);
+    let mut scheduler = model::rule::Scheduler::new(cwd.to_owned(), database);
 
-    scheduler.demand_all(resolved_ref, &vec![request])
+    scheduler.demand_all(resolved_ref, &vec![target])
 }
 
 pub fn main() {
@@ -248,7 +248,7 @@ pub fn main() {
             let src = Arc::new(read_file(&file));
             let ast = parse(&src);
             let resolved = resolve(&src, ast, Default::default());
-            for name in resolved.targets.names() {
+            for name in resolved.rules.targets() {
                 println!("{:?}", name);
             }
         }

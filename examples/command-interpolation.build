@@ -1,4 +1,4 @@
-target task("1") {
+rule task("1") {
 
   let bla = "-a";
   `ls {bla} l`;

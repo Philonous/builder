@@ -1,4 +1,4 @@
-target @dist/exe {
+rule @dist/exe {
 
   # Declare variable for reuse
   let exe = "target/\"build\"/exe";
@@ -24,7 +24,7 @@ target @dist/exe {
 
 }
 
-# target() task("app") {
+# rule() task("app") {
 #   # need("dist/exe");
 
 #   # Tag is inherited from resource, ${} is variable use/interpolation

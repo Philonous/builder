@@ -5,12 +5,12 @@ use std::collections::HashMap;
 use crate::error::{self};
 use crate::model::eval::{self};
 use crate::model::parameters::Arguments;
-use crate::model::target::{ModuleId, Request};
+use crate::model::rule::{ModuleId, Target};
 use crate::model::value::{Ident, Record};
 use crate::{
     model::{
         eval::{Resolved, ResolvedRef, Value},
-        target::{FastTrace, Trace},
+        rule::{FastTrace, Trace},
         value::record,
     },
     store,
@@ -149,23 +149,23 @@ impl SerializedRecord {
 }
 
 #[derive(Debug, Serialize, Deserialize, Hash)]
-pub struct SerializedRequest {
+pub struct SerializedTarget {
     module: SerializedModule,
-    request: SerializedRecord,
+    record: SerializedRecord,
 }
 
-impl SerializedRequest {
-    pub fn resolve(self, resolved: &mut Resolver) -> Result<Request, Error> {
-        Ok(Request {
+impl SerializedTarget {
+    pub fn resolve(self, resolved: &mut Resolver) -> Result<Target, Error> {
+        Ok(Target {
             module: self.module.resolve(resolved)?,
-            request: self.request.resolve(resolved)?,
+            record: self.record.resolve(resolved)?,
         })
     }
 
-    fn from_resolved(r: &Request, resolved: ResolvedRef<'_>) -> Self {
+    fn from_resolved(r: &Target, resolved: ResolvedRef<'_>) -> Self {
         Self {
             module: SerializedModule::from_resolved(r.module, resolved),
-            request: SerializedRecord::from_resolved(&r.request, resolved),
+            record: SerializedRecord::from_resolved(&r.record, resolved),
         }
     }
 }
@@ -215,7 +215,7 @@ pub struct SerializedDatabaseEntry {
     pub fast_trace: Option<FastTrace>,
     pub trace: Option<Trace>,
     pub result: SerializedValue,
-    pub dependencies: Vec<Vec<SerializedRequest>>,
+    pub dependencies: Vec<Vec<SerializedTarget>>,
 }
 
 impl SerializedDatabaseEntry {
@@ -224,9 +224,9 @@ impl SerializedDatabaseEntry {
         resolver: &mut Resolver,
     ) -> Result<DatabaseEntry, Error> {
         Ok(DatabaseEntry {
-            request: Request {
+            target: Target {
                 module: self.module.resolve(resolver)?,
-                request: self.target.resolve(resolver)?,
+                record: self.target.resolve(resolver)?,
             },
             fast_trace: self.fast_trace,
             trace: self.trace,
@@ -247,11 +247,11 @@ impl SerializedDatabaseEntry {
     fn from_resolved(dbe: &DatabaseEntry, resolved: ResolvedRef<'_>) -> Self {
         SerializedDatabaseEntry {
             module: SerializedModule::from_resolved(
-                dbe.request.module,
+                dbe.target.module,
                 resolved,
             ),
             target: SerializedRecord::from_resolved(
-                &dbe.request.request,
+                &dbe.target.record,
                 resolved,
             ),
             fast_trace: dbe.fast_trace.clone(),
@@ -263,7 +263,7 @@ impl SerializedDatabaseEntry {
                 .map(|group| {
                     group
                         .iter()
-                        .map(|r| SerializedRequest::from_resolved(r, resolved))
+                        .map(|r| SerializedTarget::from_resolved(r, resolved))
                         .collect()
                 })
                 .collect(),
@@ -273,7 +273,7 @@ impl SerializedDatabaseEntry {
 
 #[derive(Debug, Clone)]
 pub struct DatabaseEntry {
-    pub request: Request,
+    pub target: Target,
     pub fast_trace: Option<FastTrace>,
     pub trace: Option<Trace>,
     pub result: Value,
@@ -281,12 +281,12 @@ pub struct DatabaseEntry {
     // dependencies in later laters may depend on dependencies in
     // earlier layers. Dependencies in the same layer are independent
     // and be handled in parallel
-    pub dependencies: Vec<Vec<Request>>,
+    pub dependencies: Vec<Vec<Target>>,
 }
 
 pub struct Database {
     store: store::Store,
-    entries: HashMap<Request, DatabaseEntry>,
+    entries: HashMap<Target, DatabaseEntry>,
     duplicates: usize,
 }
 
@@ -322,7 +322,7 @@ impl Database {
             tracing::debug!("Read db Entry: {:?}", serialized_entry);
             let entry = serialized_entry.resolve(resolved)?;
 
-            if let Some(_) = entries.insert(entry.request.clone(), entry) {
+            if let Some(_) = entries.insert(entry.target.clone(), entry) {
                 duplicates += 1;
             }
         }
@@ -346,7 +346,7 @@ impl Database {
         )
         .unwrap();
         self.store.append_record(&serialized)?;
-        if let Some(_) = self.entries.insert(entry.request.clone(), entry) {
+        if let Some(_) = self.entries.insert(entry.target.clone(), entry) {
             self.duplicates += 1;
             if self.duplicates > self.entries.len() {
                 self.compact(resolved)?
@@ -379,7 +379,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn get(&self, request: &Request) -> Option<&DatabaseEntry> {
-        self.entries.get(request)
+    pub fn get(&self, target: &Target) -> Option<&DatabaseEntry> {
+        self.entries.get(target)
     }
 }

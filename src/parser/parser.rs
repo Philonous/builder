@@ -451,36 +451,36 @@ impl<'tok> TaskIdent<'tok> {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum TargetIdent<'a> {
+pub enum TargetPattern<'a> {
     Normal {
-        name: Spanned<Ident<'a>>, // E.g. target file("dist/exe")
+        name: Spanned<Ident<'a>>, // E.g. rule file("dist/exe")
         pattern: Patterns<'a>,
     },
     File(FileIdent<'a>), // E.g. ./dist/exe
     Task(TaskIdent<'a>), // E.g. :do-something
 }
 
-impl<'tok> TargetIdent<'tok> {
+impl<'tok> TargetPattern<'tok> {
     fn parse<'src: 'tok, I>(
     ) -> impl Parser<'tok, I, Self, extra::Err<Rich<'tok, Token<'src>>>> + Clone
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        let file_decl = FileIdent::parse().map(Self::File);
-        let task_decl = TaskIdent::parse().map(Self::Task);
-        let normal_target_decl = Ident::parse()
+        let file_pattern = FileIdent::parse().map(Self::File);
+        let task_pattern = TaskIdent::parse().map(Self::Task);
+        let normal_pattern = Ident::parse()
             .spanned()
             .then(Patterns::parse())
             .map(|(name, pattern)| Self::Normal { name, pattern });
-        file_decl.or(task_decl).or(normal_target_decl)
+        file_pattern.or(task_pattern).or(normal_pattern)
     }
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Decl<'a> {
-    Target {
+    Rule {
         args: LitArguments<'a>,
-        ident: TargetIdent<'a>,
+        target: TargetPattern<'a>,
 
         block: Block<'a>,
     },
@@ -492,18 +492,17 @@ impl<'tok> Decl<'tok> {
     where
         I: ValueInput<'tok, Token = Token<'src>, Span = SimpleSpan>,
     {
-        let target_header = select! {normal!(Ident("target")) => ()}
-            .ignore_then(
-                LitArguments::parse()
-                    .or_not()
-                    .map(|args| args.unwrap_or_default()),
-            );
-        let target = target_header
-            .then(TargetIdent::parse())
+        let rule_header = select! {normal!(Ident("rule")) => ()}.ignore_then(
+            LitArguments::parse()
+                .or_not()
+                .map(|args| args.unwrap_or_default()),
+        );
+        let rule = rule_header
+            .then(TargetPattern::parse())
             .then(Block::parse())
-            .map(|((args, ident), block)| Self::Target { args, ident, block });
+            .map(|((args, target), block)| Self::Rule { args, target, block });
 
-        target
+        rule
     }
 }
 

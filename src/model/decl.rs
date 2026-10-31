@@ -1,4 +1,4 @@
-use super::target;
+use super::rule;
 
 #[derive(Debug)]
-pub struct Decls(pub target::Targets);
+pub struct Decls(pub rule::Rules);

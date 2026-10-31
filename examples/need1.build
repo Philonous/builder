@@ -1,22 +1,22 @@
-target task("3") {
+rule task("3") {
   print("Running 3");
   "value=3"
 }
 
 
-target task("2") {
+rule task("2") {
   print("Running 2")
 }
 
 
-target file(path) {
+rule file(path) {
   print("Building file");
   print("Path: {path}");
   print("after print")
 }
 
 
-target task("1") {
+rule task("1") {
   print("Running 1");
   need(task("2"));
   print_debug("Outstanding: #2");

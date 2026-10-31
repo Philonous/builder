@@ -14,7 +14,7 @@
 
 }
 
-target(docker-image) "app" {
+rule(docker-image) "app" {
   need("dist/exe");
 
   # Tag is inherited from resource, ${} is variable use/interpolation

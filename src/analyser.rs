@@ -2,13 +2,11 @@ use std::path::Path;
 
 use lasso::{Interner, Resolver, Rodeo};
 
-use super::model::{eval, parameters, target};
+use super::model::{eval, parameters, rule};
 use super::parser::parser;
 use crate::error::{self, AddErrors, Errors, Spanned, WithSpan};
 use crate::model::eval::{Functions, SlotState, Slots};
-use crate::model::target::{
-    ModuleId, TargetType, TargetTypeId, TargetTypes, Targets,
-};
+use crate::model::rule::{ModuleId, TargetType, TargetTypeId, TargetTypes, Rules};
 use crate::model::value::{Ident, RecordPattern, RecordSchemas};
 use crate::parser::string::QuoteError;
 
@@ -31,7 +29,7 @@ pub enum Error {
     #[error("function {0} is not known")]
     FunNotFound(String),
     #[error("{0}")]
-    TargetError(#[from] target::Error),
+    RuleError(#[from] rule::Error),
 }
 
 impl<'a> parser::Ident<'a> {
@@ -281,7 +279,7 @@ impl<'a> parser::Expr<'a> {
             }
             parser::ExprKind::FileIdent(file_ident) => {
                 // Desugar to record
-                let schema = ctx.builtins.target_types.file.request_schema;
+                let schema = ctx.builtins.target_types.file.schema;
                 // Target type file has one field: path (string)
                 let fields = vec![eval::Expr {
                     kind: eval::ExprKind::Lit(eval::Value::String(
@@ -293,7 +291,7 @@ impl<'a> parser::Expr<'a> {
             }
             parser::ExprKind::TaskIdent(task_ident) => {
                 // Desugar to record
-                let schema = ctx.builtins.target_types.task.request_schema;
+                let schema = ctx.builtins.target_types.task.schema;
                 // Target type task has one field: name (string)
                 let fields = vec![eval::Expr {
                     kind: eval::ExprKind::Lit(eval::Value::String(
@@ -591,22 +589,22 @@ impl<'a> parser::Block<'a> {
 }
 
 impl<'a> parser::Decl<'a> {
-    fn resolve_target<'b>(
+    fn resolve_rule<'b>(
         ctx: &mut Ctx<'_>,
         kind: &TargetType,
         type_id: TargetTypeId,
         outer: &mut Scopes<'b>,
         parameters: parameters::Patterns,
         block: parser::Block<'a>,
-    ) -> Result<target::Target, Errors<Error>> {
-        // target Constr(patter1, pattern2, ...)
+    ) -> Result<rule::Rule, Errors<Error>> {
+        // rule Constr(patter1, pattern2, ...)
 
         let mut this_scope = outer.enter();
         let mut errors: Errors<Error> = Errors::empty();
 
-        // Find the "name" field that determines if the target is
-        // displayed in the CLI
-        let name = match &parameters.0[kind.name_is] {
+        // Find the "name" field that determines if the rule builds a
+        // single named target (e.g. for the CLI)
+        let target = match &parameters.0[kind.name_is] {
             parameters::Pattern::Literal(eval::Value::String(s)) => {
                 Some(s.clone())
             }
@@ -637,12 +635,12 @@ impl<'a> parser::Decl<'a> {
         let slots = this_scope.detach();
 
         let pattern = RecordPattern {
-            schema: kind.request_schema,
+            schema: kind.schema,
             patterns: parameters,
         };
-        let target = target::Target {
+        let rule = rule::Rule {
             kind: type_id,
-            name,
+            target,
             pattern,
             block,
             slots,
@@ -650,25 +648,25 @@ impl<'a> parser::Decl<'a> {
             module: ctx.module,
         };
 
-        errors.ok(target)
+        errors.ok(rule)
     }
 
     fn resolve<'scopes>(
         self,
         ctx: &mut Ctx<'_>,
         outer: &mut Scopes<'scopes>,
-    ) -> Result<target::Target, Errors<Error>> {
+    ) -> Result<rule::Rule, Errors<Error>> {
         let mut errors: Errors<Error> = Errors::empty();
 
-        let target = match self {
-            parser::Decl::Target { args, ident, block } => match ident {
-                parser::TargetIdent::File(s) => {
+        let rule = match self {
+            parser::Decl::Rule { args, target, block } => match target {
+                parser::TargetPattern::File(s) => {
                     let name = Ident(ctx.interner.get_or_intern_static("file"));
                     let (schema, _) =
                         ctx.records.find(name).expect("file record schema");
                     let (type_id, target_type) = ctx
                         .target_types
-                        .find_by_request(schema)
+                        .find_by_schema(schema)
                         .expect("file target type");
                     let patterns = vec![
                         (parameters::Pattern::Literal(eval::Value::String(
@@ -676,7 +674,7 @@ impl<'a> parser::Decl<'a> {
                         ))),
                     ];
 
-                    parser::Decl::resolve_target(
+                    parser::Decl::resolve_rule(
                         ctx,
                         target_type,
                         type_id,
@@ -687,13 +685,13 @@ impl<'a> parser::Decl<'a> {
                     .add_errors(&mut errors)
                     .unwrap_or_default()
                 }
-                parser::TargetIdent::Task(s) => {
+                parser::TargetPattern::Task(s) => {
                     let name = Ident(ctx.interner.get_or_intern_static("task"));
                     let (schema, _) =
                         ctx.records.find(name).expect("task record schema");
                     let (type_id, target_type) = ctx
                         .target_types
-                        .find_by_request(schema)
+                        .find_by_schema(schema)
                         .expect("task target type");
                     let patterns = vec![
                         (parameters::Pattern::Literal(eval::Value::String(
@@ -701,7 +699,7 @@ impl<'a> parser::Decl<'a> {
                         ))),
                     ];
 
-                    parser::Decl::resolve_target(
+                    parser::Decl::resolve_rule(
                         ctx,
                         target_type,
                         type_id,
@@ -712,7 +710,7 @@ impl<'a> parser::Decl<'a> {
                     .add_errors(&mut errors)
                     .unwrap_or_default()
                 }
-                parser::TargetIdent::Normal {
+                parser::TargetPattern::Normal {
                     name: ast_name,
                     pattern,
                 } => {
@@ -720,7 +718,7 @@ impl<'a> parser::Decl<'a> {
                     let target_type = (|| {
                         let (schema_id, schema) = ctx.records.find(name)?;
                         let (type_id, target_type) =
-                            ctx.target_types.find_by_request(schema_id)?;
+                            ctx.target_types.find_by_schema(schema_id)?;
                         Some((target_type, type_id, schema))
                     })()
                     .ok_or(Error::UnknownTargetType(ast_name.inner.to_string()))
@@ -750,14 +748,9 @@ impl<'a> parser::Decl<'a> {
                             match pattern {
                                 None => Default::default(),
                                 // We have collected all the data, now
-                                // we can resolve the targets block
-                                Some(args) => parser::Decl::resolve_target(
-                                    ctx,
-                                    target_type,
-                                    type_id,
-                                    outer,
-                                    args,
-                                    block,
+                                // we can resolve the rules block
+                                Some(args) => parser::Decl::resolve_rule(
+                                    ctx, target_type, type_id, outer, args, block,
                                 )
                                 .add_errors(&mut errors)
                                 .unwrap_or_default(),
@@ -768,9 +761,9 @@ impl<'a> parser::Decl<'a> {
             },
         };
 
-        errors.ok(target)
+        errors.ok(rule)
 
-        // Target may want to set special parameters, e.g. resolved path
+        // Rule may want to set special parameters, e.g. resolved path
     }
 }
 
@@ -785,10 +778,8 @@ fn register_builtin_target_types(
     records: &mut RecordSchemas,
     target_types: &mut TargetTypes,
 ) -> Result<BuiltinTargetTypes, Error> {
-    let file =
-        target::register_target_type_file(interner, records, target_types)?;
-    let task =
-        target::register_target_type_task(interner, records, target_types)?;
+    let file = rule::register_target_type_file(interner, records, target_types)?;
+    let task = rule::register_target_type_task(interner, records, target_types)?;
     Ok(BuiltinTargetTypes { file, task })
 }
 
@@ -811,7 +802,7 @@ impl<'a> parser::Ast<'a> {
         )
         .expect("register builtins");
 
-        let mut targets: Targets = Default::default();
+        let mut rules: Rules = Default::default();
         let mut scopes = Vec::new();
 
         let mut ctx = Ctx {
@@ -829,7 +820,7 @@ impl<'a> parser::Ast<'a> {
                 .resolve(&mut ctx, &mut Scopes(&mut scopes))
                 .add_errors(&mut errors)
                 .unwrap_or_default();
-            targets
+            rules
                 .add(t)
                 .without_span()
                 .add_errors(&mut errors)
@@ -841,8 +832,8 @@ impl<'a> parser::Ast<'a> {
             resolver: interner,
             records,
             target_types,
-            targets,
-            modules: target::Modules::new(),
+            rules,
+            modules: rule::Modules::new(),
         })
     }
 }

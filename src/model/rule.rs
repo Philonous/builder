@@ -25,9 +25,9 @@ pub enum Error {
     #[error("Target type {0} is already declared")]
     DuplicateTargetType(String),
     #[error("Could not find target {0}")]
-    TargetNotFoundByString(String),
-    #[error("Multiple targets matching {0}")]
-    TargetFoundMultiple(String),
+    TargetNotFound(String),
+    #[error("Multiple rules matching target {0}")]
+    AmbiguousTarget(String),
 }
 
 #[derive(Debug, Serialize, Deserialize, Hash, Clone)]
@@ -58,24 +58,24 @@ pub enum TraceFun {
     Builtin {
         // Return of None means resource does not exist
         fast: fn(
-            &Request,
+            &Target,
             eval::ResolvedRef<'_>,
             &Path,
         ) -> Result<Option<FastTrace>, eval::Error>,
         trace: fn(
-            &Request,
+            &Target,
             eval::ResolvedRef<'_>,
             &Path,
         ) -> Result<Option<Trace>, eval::Error>,
     },
 }
 
-// Function for displaying the target (e.g. special syntax for files or tasks)
+// Function for displaying a target (e.g. special syntax for files or tasks)
 #[derive(Clone, Copy)]
 pub enum DisplFun {
     Builtin {
         fmt: fn(
-            &Request,
+            &Target,
             eval::ResolvedRef<'_>,
             &mut std::fmt::Formatter,
         ) -> std::fmt::Result,
@@ -86,12 +86,12 @@ impl DisplFun {
     pub fn fmt(
         &self,
         // TODO
-        request: &Request,
+        target: &Target,
         resolved: eval::ResolvedRef<'_>,
         f: &mut std::fmt::Formatter,
     ) -> std::fmt::Result {
         match self {
-            Self::Builtin { fmt } => fmt(request, resolved, f),
+            Self::Builtin { fmt } => fmt(target, resolved, f),
         }
     }
 }
@@ -113,23 +113,23 @@ impl std::fmt::Debug for DisplFun {
 impl TraceFun {
     fn fast(
         &self,
-        request: &Request,
+        target: &Target,
         resolved: eval::ResolvedRef<'_>,
         base_dir: &Path,
     ) -> Result<Option<FastTrace>, eval::Error> {
         match self {
-            TraceFun::Builtin { fast, .. } => fast(request, resolved, base_dir),
+            TraceFun::Builtin { fast, .. } => fast(target, resolved, base_dir),
         }
     }
     fn trace(
         &self,
-        request: &Request,
+        target: &Target,
         resolved: eval::ResolvedRef<'_>,
         base_dir: &Path,
     ) -> Result<Option<Trace>, eval::Error> {
         match self {
             TraceFun::Builtin { trace, .. } => {
-                trace(request, resolved, base_dir)
+                trace(target, resolved, base_dir)
             }
         }
     }
@@ -200,7 +200,7 @@ impl std::ops::Index<ModuleId> for Modules {
 pub struct TargetType {
     pub id: TargetTypeId,
     // Schema that defines how we refer to targets of this type
-    pub request_schema: RecordId,
+    pub schema: RecordId,
     pub name_is: usize,
     pub trace: TraceFun,
     pub display: DisplFun,
@@ -210,20 +210,20 @@ pub struct TargetType {
 pub struct TargetResult {
     pub value: Value,
     pub clean: bool,
-    // True if the target ran, false if it was skipped because its
+    // True if the rule ran, false if it was skipped because its
     // dependencies were clean
     // TODO
     pub ran: bool,
 }
 
 impl TargetType {
-    /// Construct the request record from the name (e.g. from CLI)
-    pub fn request_from_name(
+    /// Construct the target record from the name (e.g. from CLI)
+    pub fn target_from_name(
         &self,
         resolved: eval::ResolvedRef<'_>,
         name: &str,
-    ) -> Option<Request> {
-        let schema = &resolved[self.request_schema];
+    ) -> Option<Target> {
+        let schema = &resolved[self.schema];
         let mut values = Vec::with_capacity(schema.fields.0.len());
         for (ix, (_ident, param)) in schema.fields.0.iter().enumerate() {
             let v = if self.name_is == ix {
@@ -233,9 +233,9 @@ impl TargetType {
             };
             values.push(v);
         }
-        Some(Request {
-            request: record::Record {
-                schema: self.request_schema,
+        Some(Target {
+            record: record::Record {
+                schema: self.schema,
                 values,
             },
             module: ModuleId(0),
@@ -248,7 +248,7 @@ pub struct TargetTypes(Vec<TargetType>);
 
 impl TargetTypes {
     pub fn find_by_record(&self, r: &record::Record) -> Option<&TargetType> {
-        self.0.iter().find(|tt| tt.request_schema == r.schema)
+        self.0.iter().find(|tt| tt.schema == r.schema)
     }
 }
 
@@ -281,7 +281,7 @@ impl TargetTypes {
         })?;
         let target_type = TargetType {
             id: TargetTypeId(self.0.len()),
-            request_schema: req_id,
+            schema: req_id,
             name_is,
             trace,
             display,
@@ -290,12 +290,12 @@ impl TargetTypes {
         return Ok(target_type);
     }
 
-    pub fn find_by_request(
+    pub fn find_by_schema(
         &self,
         schema: RecordId,
     ) -> Option<(TargetTypeId, &TargetType)> {
         self.0.iter().enumerate().find_map(|(ix, tt)| {
-            if tt.request_schema == schema {
+            if tt.schema == schema {
                 Some((TargetTypeId(ix), tt))
             } else {
                 None
@@ -305,9 +305,9 @@ impl TargetTypes {
 }
 
 const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
-    fast: |request, resolved, base_dir| {
-        let module = &resolved[request.module];
-        let rec = &request.request;
+    fast: |target, resolved, base_dir| {
+        let module = &resolved[target.module];
+        let rec = &target.record;
         let path = base_dir
             .join(module.workdir.join(rec.values[0].expect_string(resolved)?));
 
@@ -330,9 +330,9 @@ const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
             ),
         }))
     },
-    trace: |request, resolved, base_dir| {
-        let module = &resolved[request.module];
-        let rec = &request.request;
+    trace: |target, resolved, base_dir| {
+        let module = &resolved[target.module];
+        let rec = &target.record;
         let path = base_dir
             .join(module.workdir.join(rec.values[0].expect_string(resolved)?));
         tracing::debug!(
@@ -360,15 +360,15 @@ const FILE_TRACE_FUN: TraceFun = TraceFun::Builtin {
 };
 
 const FILE_DISPL_FUN: DisplFun = DisplFun::Builtin {
-    fmt: |request, resolved, f| {
-        let module = &resolved[request.module];
+    fmt: |target, resolved, f| {
+        let module = &resolved[target.module];
         if module.name.len() > 0 {
             write!(f, "{}:", module.with_ctx(resolved))?;
         }
         write!(
             f,
             "./{}",
-            request.request.values[0].expect_string(resolved).unwrap()
+            target.record.values[0].expect_string(resolved).unwrap()
         )
     },
 };
@@ -394,13 +394,13 @@ pub fn register_target_type_file(
 }
 
 const TASK_DISPL_FUN: DisplFun = DisplFun::Builtin {
-    fmt: |request, resolved, f| {
-        let module = &resolved[request.module];
+    fmt: |target, resolved, f| {
+        let module = &resolved[target.module];
         write!(
             f,
             "{}:{}",
             module.with_ctx(resolved),
-            request.request.values[0].expect_string(resolved).unwrap()
+            target.record.values[0].expect_string(resolved).unwrap()
         )
     },
 };
@@ -434,16 +434,16 @@ pub fn register_target_type_task(
 }
 
 #[derive(Debug, Default)]
-pub struct Target {
+pub struct Rule {
     pub kind: TargetTypeId,
-    // Display name, mostly for CLI
-    pub name: Option<String>,
-    // Determine if requested resource can be built by this target
+    // Target name if the rule builds a single named target, mostly for CLI
+    pub target: Option<String>,
+    // Determine if requested resource can be built by this rule
     pub pattern: RecordPattern,
-    // Resolved variable slots for target parameters
+    // Resolved variable slots for rule parameters
     pub slots: eval::Slots,
-    // How to match request arguments to target parameter slots. If the
-    // ith entry is k, then put the kth value of the request record
+    // How to match target arguments to rule parameter slots. If the
+    // ith entry is k, then put the kth value of the target record
     // into slot i
     pub matchers: Vec<usize>,
     pub block: eval::Block,
@@ -452,7 +452,7 @@ pub struct Target {
 
 // List of independent dependencies (each group can be run in parallel)
 #[derive(Debug)]
-pub struct Dependencies(Vec<Vec<Request>>);
+pub struct Dependencies(Vec<Vec<Target>>);
 
 impl Dependencies {
     // Invariants
@@ -461,7 +461,7 @@ impl Dependencies {
     pub fn new() -> Self {
         Dependencies(vec![vec![]])
     }
-    pub fn add(&mut self, dep: Request) {
+    pub fn add(&mut self, dep: Target) {
         self.0.last_mut().unwrap().push(dep);
         tracing::trace!("Added outstanding dependency, deps now: {:?}", self.0);
     }
@@ -477,13 +477,13 @@ impl Dependencies {
     }
 }
 
-impl Target {
+impl Rule {
     // (Only) Run the code
     pub fn execute(
         &self,
         resolved: eval::ResolvedRef<'_>,
         scheduler: &mut Scheduler,
-        request: &Request,
+        target: &Target,
     ) -> Result<(Value, Dependencies), error::Spanned<eval::Error>> {
         let mut variables = Default::default();
         let mut dependencies: Dependencies = Dependencies::new();
@@ -501,7 +501,7 @@ impl Target {
             let mut slots = self.slots.clone();
             for (to, from) in self.matchers.iter().enumerate() {
                 slots.0[to].value = eval::SlotState::Value(
-                    request.request.values[*from].clone().into(),
+                    target.record.values[*from].clone().into(),
                 );
             }
             let res = {
@@ -520,15 +520,15 @@ impl Target {
         Ok((res, dependencies))
     }
 
-    // Try to match the target to a single string (e.g. cli)
-    pub fn matches_string(&self, s: &str) -> bool {
-        match &self.name {
+    // Check if the rule builds the named target (e.g. from cli)
+    pub fn matches_target(&self, s: &str) -> bool {
+        match &self.target {
             None => false,
             Some(n) => n == s,
         }
     }
 
-    /// Given a target database entry, check if all registered
+    /// Given a database entry, check if all registered
     /// dependencies are clean
     fn all_deps_clean(
         scheduler: &mut Scheduler,
@@ -539,29 +539,29 @@ impl Target {
         // We can process dependencies within each layer in parallel,
         // because there are no data dependencies between them. If the
         // layer is clean, we continue to the next layer - the output
-        // would have been the same, hence we assume the target would
+        // would have been the same, hence we assume the rule would
         // take the same path
         for layer in &c.dependencies {
             let mut outstanding = Vec::new();
             // First schedule all dependencies
-            for request in layer {
-                scheduler.add(resolved, request)?;
-                outstanding.push(Request {
-                    module: request.module,
-                    request: request.request.clone(),
+            for target in layer {
+                scheduler.add(resolved, target)?;
+                outstanding.push(Target {
+                    module: target.module,
+                    record: target.record.clone(),
                 });
             }
             // Now demand them (splitting schedule/demand
             // anticipates parallel scheduler and works
             // just fine for the sequential one)
-            for request in outstanding {
-                let dep = request.request.with_ctx(resolved).to_string();
-                let res = scheduler.demand(resolved, request).without_span()?;
+            for target in outstanding {
+                let dep = target.record.with_ctx(resolved).to_string();
+                let res = scheduler.demand(resolved, target).without_span()?;
                 if !res.clean {
                     tracing::info!("Dependency {dep} not clean, running {tgt}",);
                     // Found a dirty dependency. We stop
                     // querying dependencies and continue
-                    // building the target. Dependencies
+                    // building the rule. Dependencies
                     // will be re-requested - but that's
                     // fine, that will just use the stored
                     // values
@@ -576,19 +576,19 @@ impl Target {
         &self,
         resolved: eval::ResolvedRef<'_>,
         scheduler: &mut Scheduler,
-        request: &Request,
+        target: &Target,
     ) -> Result<TargetResult, error::Spanned<eval::Error>> {
         let target_type = &resolved[self.kind];
-        let tgt = request.with_ctx(resolved).to_string();
+        let tgt = target.with_ctx(resolved).to_string();
 
         tracing::error_span!("target", target = tgt);
 
         let before_trace = target_type
             .trace
-            .trace(request, resolved, &scheduler.base_dir)
+            .trace(target, resolved, &scheduler.base_dir)
             .without_span()?;
 
-        let cached = scheduler.database.get(request).cloned();
+        let cached = scheduler.database.get(target).cloned();
 
         match cached {
             Some(c) => {
@@ -600,12 +600,12 @@ impl Target {
                 };
 
                 if trace_clean
-                    && Target::all_deps_clean(scheduler, resolved, &tgt, &c)?
+                    && Rule::all_deps_clean(scheduler, resolved, &tgt, &c)?
                 {
                     blog!(
                         info,
                         target = tgt,
-                        "Target is clean and doesn't need to be run"
+                        "Target is up to date"
                     );
 
                     return Ok(TargetResult {
@@ -620,13 +620,13 @@ impl Target {
         };
         blog!(info, target = tgt, "Starting");
         let (value, dependencies) =
-            match self.execute(resolved, scheduler, request) {
+            match self.execute(resolved, scheduler, target) {
                 Ok((v, dependencies)) => (v, dependencies),
                 Err(e) => {
                     // TODO: Make use of span
                     blog!(
                         error,
-                        target = request.with_ctx(resolved),
+                        target = target.with_ctx(resolved),
                         "Target failed: {}",
                         e.inner
                     );
@@ -656,17 +656,17 @@ impl Target {
         }
 
         // TODO: Make use of fast trace
-        // let fast_trace = target_type.trace.fast(resolved, &request).without_span()?;
+        // let fast_trace = target_type.trace.fast(resolved, &target).without_span()?;
         let after_trace = target_type
             .trace
-            .trace(&request, resolved, &scheduler.base_dir)
+            .trace(&target, resolved, &scheduler.base_dir)
             .without_span()?;
 
         scheduler
             .database
             .add(
                 DatabaseEntry {
-                    request: request.clone(),
+                    target: target.clone(),
                     fast_trace: None, // TODO
                     trace: after_trace.clone(),
                     result: value.clone(),
@@ -697,58 +697,58 @@ impl Target {
 }
 
 #[derive(Default, Debug)]
-pub struct Targets(Vec<Target>);
+pub struct Rules(Vec<Rule>);
 
 #[derive(Default, Hash, Debug, PartialEq, Eq, Clone, Copy)]
-pub struct TargetId(usize);
+pub struct RuleId(usize);
 
-impl std::ops::Index<TargetId> for Targets {
-    type Output = Target;
+impl std::ops::Index<RuleId> for Rules {
+    type Output = Rule;
 
-    fn index(&self, index: TargetId) -> &Self::Output {
+    fn index(&self, index: RuleId) -> &Self::Output {
         &self.0[index.0]
     }
 }
 
-impl Targets {
-    pub fn add(&mut self, t: Target) -> Result<(), Error> {
+impl Rules {
+    pub fn add(&mut self, t: Rule) -> Result<(), Error> {
         self.0.push(t);
-        // TODO: Check for name collisions so find_by_string never fails
+        // TODO: Check for target collisions so find_by_target never fails
         Ok(())
     }
-    pub fn find_by_string(&self, s: &str) -> Result<&Target, Error> {
+    pub fn find_by_target(&self, s: &str) -> Result<&Rule, Error> {
         match self
             .0
             .iter()
-            .filter(|t| t.matches_string(s))
+            .filter(|t| t.matches_target(s))
             .collect::<Vec<_>>()[..]
         {
-            [] => Err(Error::TargetNotFoundByString(String::from(s))),
+            [] => Err(Error::TargetNotFound(String::from(s))),
             [t] => Ok(t),
-            _ => Err(Error::TargetFoundMultiple(String::from(s))),
+            _ => Err(Error::AmbiguousTarget(String::from(s))),
         }
     }
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.0.iter().filter_map(|t| t.name.as_deref())
+    pub fn targets(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().filter_map(|t| t.target.as_deref())
     }
 
     pub fn match_(
         &self,
         resolved: eval::ResolvedRef<'_>,
-        request: &Request,
-    ) -> Result<Option<TargetId>, eval::Error> {
-        // Filter targets that match the given request
+        target: &Target,
+    ) -> Result<Option<RuleId>, eval::Error> {
+        // Filter rules that match the given target
         let candidates = self
             .0
             .iter()
             .enumerate()
-            .filter(|(_ix, target)| {
-                target.module == request.module
-                    && target.pattern.matches(&request.request)
+            .filter(|(_ix, rule)| {
+                rule.module == target.module
+                    && rule.pattern.matches(&target.record)
             })
             .collect::<Vec<_>>();
 
-        // Find the most specific target
+        // Find the most specific rule
         let (mut ix, mut cand) = match candidates.first() {
             Some((ix, c)) => (*ix, *c),
             None => return Ok(None),
@@ -767,10 +767,10 @@ impl Targets {
                 || cand.pattern.patterns.cmp_specificity(&p.pattern.patterns)
                     == Some(Ordering::Greater)
         }) {
-            Ok(Some(TargetId(ix)))
+            Ok(Some(RuleId(ix)))
         } else {
             Err(eval::Error::AmbiguousTarget(
-                request.with_ctx(resolved).to_string(),
+                target.with_ctx(resolved).to_string(),
             ))
         }
     }
@@ -792,32 +792,32 @@ struct RequestedTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Request {
+pub struct Target {
     pub module: ModuleId,
-    // Invariant: The record matches the target
-    pub request: record::Record,
+    // Invariant: The record matches the target type's schema
+    pub record: record::Record,
 }
 
-impl DisplayWith for Request {
+impl DisplayWith for Target {
     fn fmt(
         &self,
         f: &mut std::fmt::Formatter<'_>,
         resolved: eval::ResolvedRef<'_>,
     ) -> std::fmt::Result {
         if let Some(target_type) =
-            resolved.target_types.find_by_record(&self.request)
+            resolved.target_types.find_by_record(&self.record)
         {
-            // Request resolves to a target type. Use the target type's display
-            // function to format the request
+            // Target resolves to a target type. Use the target type's display
+            // function to format the target
             target_type.display.fmt(self, resolved, f)
         } else {
-            // Request record does not resolve to a target type. Use a
+            // Target record does not resolve to a target type. Use a
             // generic formatting method
             write!(
                 f,
                 "{}:{}",
                 resolved[self.module].with_ctx(resolved),
-                self.request.with_ctx(resolved)
+                self.record.with_ctx(resolved)
             )
         }
     }
@@ -825,14 +825,14 @@ impl DisplayWith for Request {
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct Dependency {
-    target: TargetId,
-    request: record::Record,
+    rule: RuleId,
+    record: record::Record,
 }
 
 // single-threaded scheduler
 pub struct Scheduler {
     next: AtomicU32,
-    requested: HashMap<Request, RequestedTarget>,
+    requested: HashMap<Target, RequestedTarget>,
     database: Database,
     // The base dir the entire build runs in (not to be confused with the directory a *module* runs in)
     pub base_dir: PathBuf,
@@ -855,25 +855,25 @@ impl Scheduler {
     pub fn add(
         &mut self,
         resolved: eval::ResolvedRef<'_>,
-        request: &Request,
-        // Resolved target
-    ) -> Result<TargetId, Spanned<eval::Error>> {
-        let target =
-            match resolved.targets.match_(resolved, &request).without_span()? {
-                Some(target) => target,
+        target: &Target,
+        // Resolved rule
+    ) -> Result<RuleId, Spanned<eval::Error>> {
+        let rule =
+            match resolved.rules.match_(resolved, &target).without_span()? {
+                Some(rule) => rule,
                 None => {
                     todo!()
-                    // No target matches requested resource
+                    // No rule matches requested resource
                 }
             };
-        let old = self.requested.get(request);
+        let old = self.requested.get(target);
         match old {
             None => {
-                tracing::trace!("New target {:?} requested", request);
+                tracing::trace!("New target {:?} requested", target);
                 self.requested.insert(
-                    request.clone(),
+                    target.clone(),
                     RequestedTarget {
-                        kind: resolved[target].kind,
+                        kind: resolved[rule].kind,
                         seq: self.next_seq(),
                         state: TargetState::Requested,
                     },
@@ -883,26 +883,26 @@ impl Scheduler {
             // Target was already built
             Some(s) => match s.state {
                 TargetState::Done(_) => {
-                    tracing::trace!("Target {:?} was already done", request);
+                    tracing::trace!("Target {:?} was already done", target);
                     Ok(())
                 }
                 TargetState::Running => {
                     // This won't work with the parallel scheduler
                     // since a diamond dependency might schedule the
                     // target while another path legally requests it
-                    tracing::error!("Target request {:?} is circular", request);
+                    tracing::error!("Target {:?} is circular", target);
                     Err(eval::Error::CircularDependency(
-                        request.with_ctx(resolved).to_string(),
+                        target.with_ctx(resolved).to_string(),
                     ))
                     .without_span()
                 }
                 TargetState::Error(_) => {
                     tracing::trace!(
                         "Target {:?} had already finished with an error",
-                        request
+                        target
                     );
                     Err(eval::Error::DependencyError(
-                        request.with_ctx(resolved).to_string(),
+                        target.with_ctx(resolved).to_string(),
                     ))
                     .without_span()
                 }
@@ -910,29 +910,29 @@ impl Scheduler {
                 TargetState::Requested => {
                     tracing::trace!(
                     "Target {:?} had already been requested but was not yet finished",
-                    request
+                    target
                 );
                     Ok(())
                 }
             },
         }?;
-        Ok(target)
+        Ok(rule)
     }
 
     fn find_result(
         &self,
         resolved: eval::ResolvedRef<'_>,
-        request: &Request,
+        target: &Target,
     ) -> Result<Option<TargetResult>, eval::Error> {
         match &self
             .requested
-            .get(request)
+            .get(target)
             .expect("find_result on resource that has not been scheduled")
             .state
         {
             TargetState::Done(v) => Ok(Some(v.clone())),
             TargetState::Error(_) => Err(eval::Error::DependencyError(
-                request.with_ctx(resolved).to_string(),
+                target.with_ctx(resolved).to_string(),
             )),
             TargetState::Requested | TargetState::Running => Ok(None),
         }
@@ -941,35 +941,32 @@ impl Scheduler {
     fn run_one(
         &mut self,
         resolved: eval::ResolvedRef<'_>,
-        request: Request,
+        target: Target,
     ) -> Result<TargetResult, eval::Error> {
-        let target =
-            resolved
-                .targets
-                .match_(resolved, &request)?
-                .ok_or_else(|| {
-                    eval::Error::TargetNotFound(
-                        request.with_ctx(resolved).to_string(),
-                    )
-                })?;
-        (*self.requested.get_mut(&request).expect("run_one")).state =
+        let rule =
+            resolved.rules.match_(resolved, &target)?.ok_or_else(|| {
+                eval::Error::RuleNotFound(
+                    target.with_ctx(resolved).to_string(),
+                )
+            })?;
+        (*self.requested.get_mut(&target).expect("run_one")).state =
             TargetState::Running;
-        match resolved[target].run(resolved, self, &request) {
+        match resolved[rule].run(resolved, self, &target) {
             Ok(res) => {
                 (*self
                     .requested
-                    .get_mut(&request)
+                    .get_mut(&target)
                     // add() has added the item to requested as well
                     .expect("run_one"))
                 .state = TargetState::Done(res.clone());
                 Ok(res)
             }
             Err(e) => {
-                let tgt = request.with_ctx(resolved).to_string();
+                let tgt = target.with_ctx(resolved).to_string();
                 blog!(error, target = tgt, "Target failed with: {e}");
                 (*self
                     .requested
-                    .get_mut(&request)
+                    .get_mut(&target)
                     // Entry must exist by construction
                     .expect("flush"))
                 .state = TargetState::Error(e);
@@ -982,19 +979,19 @@ impl Scheduler {
     pub fn demand(
         &mut self,
         resolved: eval::ResolvedRef<'_>,
-        request: Request,
+        target: Target,
     ) -> Result<TargetResult, eval::Error> {
-        tracing::trace!("Resource {:?} demanded", request);
+        tracing::trace!("Resource {:?} demanded", target);
         // Check if value is already present
-        match self.find_result(resolved, &request)? {
+        match self.find_result(resolved, &target)? {
             // Target already finished, return result
             Some(v) => Ok(v),
             // Target still outstanding, run
-            None => Ok(self.run_one(resolved, request)?),
+            None => Ok(self.run_one(resolved, target)?),
         }
     }
 
-    fn take(&mut self) -> HashMap<Request, RequestedTarget> {
+    fn take(&mut self) -> HashMap<Target, RequestedTarget> {
         self.next.store(0, std::sync::atomic::Ordering::Relaxed);
         std::mem::take(&mut self.requested)
     }
@@ -1004,14 +1001,14 @@ impl Scheduler {
     pub fn demand_all(
         &mut self,
         resolved: eval::ResolvedRef<'_>,
-        requests: &[Request],
+        targets: &[Target],
     ) -> Result<Vec<TargetReport>, Spanned<eval::Error>> {
-        for r in requests {
-            let target = self.add(resolved, r)?;
+        for r in targets {
+            let rule = self.add(resolved, r)?;
         }
 
-        let mut res = Vec::with_capacity(requests.len());
-        for r in requests.into_iter() {
+        let mut res = Vec::with_capacity(targets.len());
+        for r in targets.into_iter() {
             let _ = self
                 .demand(resolved, r.clone())
                 .without_span()
@@ -1021,21 +1018,19 @@ impl Scheduler {
         let mut report: Vec<TargetReport> = self
             .take()
             .into_iter()
-            .map(|(request, st)| TargetReport {
+            .map(|(target, st)| TargetReport {
                 seq: st.seq,
-                request: request.with_ctx(resolved).to_string(),
+                target: target.with_ctx(resolved).to_string(),
                 result: match st.state {
                     TargetState::Error(error) => ReportResult::Error { error },
 
                     // TODO: Check that this state can be reached and corresponds to a cancelled dependency
                     TargetState::Requested => ReportResult::Cancelled,
                     TargetState::Running => ReportResult::Cancelled,
-                    TargetState::Done(res) if res.ran => {
-                        ReportResult::Success {
-                            clean: res.clean,
-                            value: res.value,
-                        }
-                    }
+                    TargetState::Done(res) if res.ran => ReportResult::Success {
+                        clean: res.clean,
+                        value: res.value,
+                    },
                     TargetState::Done(_res) => ReportResult::Skipped,
                 },
             })
@@ -1050,12 +1045,12 @@ impl Scheduler {
 
 #[derive(Debug)]
 pub enum ReportResult {
-    /// Target ran successfully
+    /// Target was built successfully
     Success {
         clean: bool,
         value: eval::Value,
     },
-    /// Scheduler decided target did not need to be run (e.g. cache
+    /// Scheduler decided rule did not need to be run (e.g. cache
     /// hit, dependencies clean)
     Skipped,
     /// Scheduled to run but not finished, e.g. build failed
@@ -1069,7 +1064,7 @@ pub enum ReportResult {
 pub struct TargetReport {
     /// Rendered name
     pub seq: u32,
-    pub request: String,
+    pub target: String,
     pub result: ReportResult,
 }
 
@@ -1082,7 +1077,7 @@ impl TargetReport {
             ReportResult::Cancelled => (yansi::Color::Yellow),
             ReportResult::Error { .. } => (yansi::Color::Red),
         };
-        eprint!("[{}] ", self.request.paint(yansi::Color::BrightBlue));
+        eprint!("[{}] ", self.target.paint(yansi::Color::BrightBlue));
         match &self.result {
             ReportResult::Success { clean, value } => {
                 eprint!("{}", "completed".paint(color));
